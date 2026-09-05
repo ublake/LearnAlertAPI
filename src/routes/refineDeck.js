@@ -1,6 +1,9 @@
 import { DECK_SCHEMA } from "../schemas.js";
 import { REFINE_INSTRUCTIONS } from "../prompts.js";
-import { callStructuredOutput } from "../lib/openai.js";
+import {
+  callStructuredOutput,
+  sourceContentItem
+} from "../lib/openai.js";
 import { normalizeGeneratedDeck } from "../lib/deck.js";
 import { validateRefineRequest } from "../lib/validation.js";
 import { json } from "../lib/http.js";
@@ -16,20 +19,13 @@ export async function refineDeck(request, env, requestId) {
           .join("\n")
       : "No previous chat messages.";
 
-  const sourceBlock = config.sourceText
-    ? `
-<source_material name="${config.sourceName || "source"}">
-${config.sourceText}
-</source_material>
-`
-    : `
-<source_material>
-No source material was supplied in this edit request.
-Do not add new factual claims beyond the current deck.
-</source_material>
-`;
+  const sourceContext = config.sourceId
+    ? "<source_note>The original uploaded source is attached to this request. Use it as the factual authority and inspect its original structure/visuals when relevant.</source_note>"
+    : config.sourceText
+      ? `<source_material name="${config.sourceName || "source"}">\n${config.sourceText}\n</source_material>`
+      : "<source_material>No source material was supplied. Do not introduce new factual claims beyond what is already supported by the current deck.</source_material>";
 
-  const input = `
+  const contextText = `
 <maximum_cards>
 ${config.maxCards}
 </maximum_cards>
@@ -46,8 +42,30 @@ ${historyText}
 ${config.instruction}
 </user_request>
 
-${sourceBlock}
+${sourceContext}
 `.trim();
+
+  let input;
+
+  if (config.sourceId) {
+    input = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: contextText
+          },
+          sourceContentItem({
+            sourceId: config.sourceId,
+            sourceKind: config.sourceKind
+          })
+        ]
+      }
+    ];
+  } else {
+    input = contextText;
+  }
 
   const ai = await callStructuredOutput({
     env,
@@ -67,6 +85,17 @@ ${sourceBlock}
   return json({
     success: true,
     requestId,
+    ...(config.sourceId
+      ? {
+          sourceId: config.sourceId,
+          sourceKind: config.sourceKind,
+          source: {
+            id: config.sourceId,
+            kind: config.sourceKind,
+            name: config.sourceName || ""
+          }
+        }
+      : {}),
     ...normalized,
     meta: {
       model: ai.model,

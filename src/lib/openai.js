@@ -1,4 +1,4 @@
-import { MODEL } from "../config.js";
+import { MODEL, LIMITS } from "../config.js";
 
 export class OpenAIRequestError extends Error {
   constructor(message, status = 500, details = null) {
@@ -20,6 +20,59 @@ function extractOutputText(data) {
   }
 
   return parts.join("");
+}
+
+export async function uploadSourceFile(env, file) {
+  if (!env.OPENAI_API_KEY) {
+    throw new OpenAIRequestError(
+      "OPENAI_API_KEY is not configured on the Worker.",
+      500
+    );
+  }
+
+  const form = new FormData();
+  form.append("purpose", "user_data");
+  form.append("file", file, file.name || "upload");
+  form.append("expires_after[anchor]", "created_at");
+  form.append(
+    "expires_after[seconds]",
+    String(LIMITS.SOURCE_EXPIRATION_SECONDS)
+  );
+
+  const response = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`
+    },
+    body: form
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new OpenAIRequestError(
+      data?.error?.message || "Failed to upload source file to OpenAI.",
+      response.status,
+      data?.error || data
+    );
+  }
+
+  return data;
+}
+
+export function sourceContentItem({ sourceId, sourceKind = "file" }) {
+  if (sourceKind === "image") {
+    return {
+      type: "input_image",
+      file_id: sourceId,
+      detail: "auto"
+    };
+  }
+
+  return {
+    type: "input_file",
+    file_id: sourceId
+  };
 }
 
 export async function callStructuredOutput({

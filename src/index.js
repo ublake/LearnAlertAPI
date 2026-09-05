@@ -18,7 +18,7 @@ export default {
       return json({
         ok: true,
         service: "LearnAlert API",
-        version: "1.0.0",
+        version: "1.1.0",
         endpoints: [
           "POST /v1/decks/generate",
           "POST /v1/decks/refine",

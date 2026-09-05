@@ -3,7 +3,8 @@ import {
   CARD_TYPES,
   MODES,
   DIFFICULTIES,
-  LANGUAGE_DIRECTIONS
+  LANGUAGE_DIRECTIONS,
+  ALLOWED_UPLOAD_EXTENSIONS
 } from "../config.js";
 
 export function clampInteger(value, fallback, min, max) {
@@ -50,13 +51,20 @@ export function stringArray(value, allowed = null) {
   return [...new Set(values.filter((item) => allowed.includes(item)))];
 }
 
-export function validateGenerateRequest(body) {
-  const text = requiredString(
-    body?.text,
-    "text",
-    LIMITS.MAX_SOURCE_CHARS
-  );
+function parseFormStringArray(value) {
+  if (typeof value !== "string" || !value.trim()) return [];
 
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // Fall through to comma-separated format.
+  }
+
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function commonGenerateOptions(body) {
   const maxCards = clampInteger(
     body?.maxCards,
     LIMITS.DEFAULT_MAX_CARDS,
@@ -64,35 +72,89 @@ export function validateGenerateRequest(body) {
     LIMITS.MAX_CARDS
   );
 
-  const mode = enumValue(body?.mode, MODES, "auto");
-  const difficulty = enumValue(body?.difficulty, DIFFICULTIES, "auto");
-  const languageDirection = enumValue(
-    body?.languageDirection,
-    LANGUAGE_DIRECTIONS,
-    "auto"
-  );
+  return {
+    maxCards,
+    mode: enumValue(body?.mode, MODES, "auto"),
+    difficulty: enumValue(body?.difficulty, DIFFICULTIES, "auto"),
+    languageDirection: enumValue(
+      body?.languageDirection,
+      LANGUAGE_DIRECTIONS,
+      "auto"
+    ),
+    preferredCardTypes: stringArray(
+      body?.preferredCardTypes,
+      CARD_TYPES
+    ),
+    userInstruction: optionalString(
+      body?.userInstruction,
+      LIMITS.MAX_USER_INSTRUCTION_CHARS
+    ),
+    sourceName: optionalString(body?.sourceName, 200)
+  };
+}
 
-  const preferredCardTypes = stringArray(
-    body?.preferredCardTypes,
-    CARD_TYPES
+export function validateGenerateRequest(body) {
+  const text = requiredString(
+    body?.text,
+    "text",
+    LIMITS.MAX_SOURCE_CHARS
   );
-
-  const userInstruction = optionalString(
-    body?.userInstruction,
-    LIMITS.MAX_USER_INSTRUCTION_CHARS
-  );
-
-  const sourceName = optionalString(body?.sourceName, 200);
 
   return {
     text,
-    maxCards,
-    mode,
-    difficulty,
-    languageDirection,
+    ...commonGenerateOptions(body)
+  };
+}
+
+export function validateGenerateForm(formData) {
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    throw new ValidationError("file is required for multipart upload.");
+  }
+
+  if (file.size <= 0) {
+    throw new ValidationError("The uploaded file is empty.");
+  }
+
+  if (file.size > LIMITS.MAX_UPLOAD_BYTES) {
+    throw new ValidationError("The uploaded file is too large. Maximum size is 20 MB.");
+  }
+
+  const filename = file.name || "upload";
+  const extension = filename.includes(".")
+    ? filename.split(".").pop().toLowerCase()
+    : "";
+
+  if (!ALLOWED_UPLOAD_EXTENSIONS.includes(extension)) {
+    throw new ValidationError(
+      `Unsupported file type. Supported: ${ALLOWED_UPLOAD_EXTENSIONS.join(", ")}.`
+    );
+  }
+
+  const preferredCardTypes = parseFormStringArray(
+    formData.get("preferredCardTypes")
+  );
+
+  const options = commonGenerateOptions({
+    maxCards: formData.get("maxCards"),
+    mode: formData.get("mode"),
+    difficulty: formData.get("difficulty"),
+    languageDirection: formData.get("languageDirection"),
     preferredCardTypes,
-    userInstruction,
-    sourceName
+    userInstruction: formData.get("userInstruction"),
+    sourceName: formData.get("sourceName") || filename
+  });
+
+  const mimeType = file.type || "application/octet-stream";
+  const sourceKind = mimeType.startsWith("image/") ? "image" : "file";
+
+  return {
+    file,
+    mimeType,
+    sourceKind,
+    ...options,
+    sourceName: options.sourceName || filename
   };
 }
 
@@ -116,7 +178,21 @@ export function validateRefineRequest(body) {
     LIMITS.MAX_SOURCE_CHARS
   );
 
-  const sourceName = optionalString(body.sourceName, 200);
+  const sourceId = optionalString(
+    body.sourceId || body?.source?.id,
+    200
+  );
+
+  const sourceKind = enumValue(
+    body.sourceKind || body?.source?.kind,
+    ["file", "image"],
+    "file"
+  );
+
+  const sourceName = optionalString(
+    body.sourceName || body?.source?.name,
+    200
+  );
 
   const maxCards = clampInteger(
     body.maxCards,
@@ -148,6 +224,8 @@ export function validateRefineRequest(body) {
     deck: body.deck,
     instruction,
     sourceText,
+    sourceId,
+    sourceKind,
     sourceName,
     maxCards,
     chatHistory
