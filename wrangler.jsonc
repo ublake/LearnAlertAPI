@@ -1,0 +1,8 @@
+{
+  "name": "learnalert-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-04",
+  "observability": {
+    "enabled": true
+  }
+}

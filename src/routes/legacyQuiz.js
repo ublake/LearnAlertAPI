@@ -1,0 +1,69 @@
+import { generateDeck } from "./generateDeck.js";
+
+export async function legacyQuiz(request, env, requestId) {
+  const originalBody = await request.json();
+
+  const questionCount = Math.min(
+    Math.max(Number(originalBody?.questionCount) || 10, 1),
+    50
+  );
+
+  const translatedBody = {
+    text: originalBody?.text,
+    maxCards: questionCount,
+    mode: "exam",
+    difficulty: "auto",
+    preferredCardTypes: ["multiple_choice"],
+    userInstruction:
+      "Create multiple-choice cards only. Generate the requested number when the source supports that many useful distinct questions."
+  };
+
+  const translatedRequest = new Request(request.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(translatedBody)
+  });
+
+  const response = await generateDeck(
+    translatedRequest,
+    env,
+    requestId
+  );
+
+  const data = await response.json();
+
+  if (!data.success) {
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: response.headers
+    });
+  }
+
+  const questions = data.deck.cards
+    .filter((card) => card.type === "multiple_choice")
+    .map((card) => ({
+      question: card.prompt,
+      hint: card.hint,
+      answers: card.options,
+      correctAnswerIndex: card.correctAnswerIndex,
+      explanation: card.explanation
+    }));
+
+  return new Response(
+    JSON.stringify(
+      {
+        success: true,
+        deckTitle: data.deck.title,
+        questions
+      },
+      null,
+      2
+    ),
+    {
+      status: 200,
+      headers: response.headers
+    }
+  );
+}
