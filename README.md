@@ -30,7 +30,8 @@ Fields:
 - `mode` — `auto`, `language`, `exam`, `mixed`
 - `difficulty` — `auto`, `easy`, `medium`, `hard`
 - `languageDirection` — `auto`, `target_to_english`, `english_to_target`, `mixed`
-- `preferredCardTypes` — JSON array or comma-separated list, e.g. `["tap_reveal","multiple_choice"]`
+- `preferredCardTypes` — JSON array or comma-separated list containing `tap_reveal`, `multiple_choice`, `matching`, and/or `fill_blank`
+- `chatHistory` — optional JSON-string array of recent `{ "role", "content" }` messages
 - `userInstruction` — optional
 - `sourceName` — optional; filename is used automatically when omitted
 
@@ -43,7 +44,8 @@ curl -X POST https://api.learnalertapp.com/v1/decks/generate \
   -F 'mode=auto' \
   -F 'difficulty=auto' \
   -F 'languageDirection=mixed' \
-  -F 'preferredCardTypes=["tap_reveal","multiple_choice"]' \
+  -F 'preferredCardTypes=["tap_reveal","multiple_choice","matching","fill_blank"]' \
+  -F 'chatHistory=[{"role":"user","content":"Create Spanish vocabulary cards."},{"role":"assistant","content":"Send your vocabulary notes."}]' \
   -F 'userInstruction=Focus on new vocabulary and important grammar.'
 ```
 
@@ -114,14 +116,85 @@ The original JSON text flow still works:
   "mode": "auto",
   "difficulty": "auto",
   "languageDirection": "mixed",
-  "preferredCardTypes": ["tap_reveal", "multiple_choice"],
+  "preferredCardTypes": [
+    "tap_reveal",
+    "multiple_choice",
+    "matching",
+    "fill_blank"
+  ],
+  "chatHistory": [
+    {
+      "role": "user",
+      "content": "Create Spanish vocabulary cards."
+    },
+    {
+      "role": "assistant",
+      "content": "Send your vocabulary notes."
+    }
+  ],
   "userInstruction": "Focus on new vocabulary."
+}
+```
+
+Generation and refinement pass `chatHistory` to OpenAI as role-preserving
+conversation messages. At most the latest 12 non-empty user/assistant messages
+are used, and each message is limited to 1,500 characters.
+
+### Card types
+
+Every returned card uses the same shape. `matchingPairs` is required and must be
+an empty array for every type except `matching`.
+
+A matching card contains 2-4 one-to-one pairs with unique left and right values:
+
+```json
+{
+  "id": "card-id",
+  "type": "matching",
+  "prompt": "Match each term with its definition.",
+  "answer": "",
+  "hint": "",
+  "explanation": "",
+  "options": [],
+  "correctAnswerIndex": -1,
+  "matchingPairs": [
+    { "left": "Hola", "right": "Hello" },
+    { "left": "Adiós", "right": "Goodbye" }
+  ],
+  "difficulty": "medium",
+  "tags": [],
+  "sourceExcerpt": "",
+  "sourceLocator": ""
+}
+```
+
+A fill-in-the-blank card uses one visible `____` marker. The app can grade its
+answer case-insensitively:
+
+```json
+{
+  "id": "card-id",
+  "type": "fill_blank",
+  "prompt": "The capital of France is ____.",
+  "answer": "Paris",
+  "hint": "",
+  "explanation": "",
+  "options": [],
+  "correctAnswerIndex": -1,
+  "matchingPairs": [],
+  "difficulty": "medium",
+  "tags": [],
+  "sourceExcerpt": "",
+  "sourceLocator": ""
 }
 ```
 
 ### POST /v1/decks/refine
 
 Chat-style editing of the current generated deck.
+
+Successful refinement returns `action: "deck"` and the complete updated deck,
+including unchanged cards. Valid existing card IDs are preserved where possible.
 
 For a deck originally generated from a file, send the `sourceId` and `sourceKind` returned by generation so the original source can be attached again without uploading it from the phone a second time.
 
@@ -187,5 +260,9 @@ For files/photos, stop extracting the document to text before generation. Send t
 For pasted notes, keep using the JSON text request.
 
 When generation returns `sourceId`, `sourceKind`, and `source`, keep those in temporary generation/review state. Send them back to `/v1/decks/refine` while the user chats with the AI.
+
+Send recent `chatHistory` on every generation/refinement turn so follow-up
+messages retain their user/assistant roles. Decode all four card types and include
+`matchingPairs: []` on non-matching cards when sending a deck back for refinement.
 
 Do not persist OpenAI credentials anywhere in the app.

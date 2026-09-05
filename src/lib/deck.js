@@ -4,19 +4,56 @@ function cleanString(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
 
-function normalizeCard(card, usedIds) {
+function normalizeMatchingPairs(value) {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
+    throw new Error("A matching card must contain 2 to 4 complete pairs.");
+  }
+
+  const pairs = value.map((pair) => ({
+    left: cleanString(pair?.left),
+    right: cleanString(pair?.right)
+  }));
+
+  if (pairs.some((pair) => !pair.left || !pair.right)) {
+    throw new Error("A matching card must contain 2 to 4 complete pairs.");
+  }
+
+  const leftValues = new Set(
+    pairs.map((pair) => pair.left.toLowerCase())
+  );
+  const rightValues = new Set(
+    pairs.map((pair) => pair.right.toLowerCase())
+  );
+
+  if (leftValues.size !== pairs.length || rightValues.size !== pairs.length) {
+    throw new Error("A matching card must contain unique left and right values.");
+  }
+
+  return pairs;
+}
+
+function normalizeCard(card, usedIds, validIds = null) {
   let id = cleanString(card?.id);
 
-  if (!id || id.startsWith("new_") || usedIds.has(id)) {
+  if (
+    !id ||
+    id.startsWith("new_") ||
+    usedIds.has(id) ||
+    (validIds && !validIds.has(id))
+  ) {
     id = crypto.randomUUID();
   }
 
   usedIds.add(id);
 
-  const type =
-    card?.type === "multiple_choice"
-      ? "multiple_choice"
-      : "tap_reveal";
+  const type = [
+    "tap_reveal",
+    "multiple_choice",
+    "matching",
+    "fill_blank"
+  ].includes(card?.type)
+    ? card.type
+    : "tap_reveal";
 
   const options = Array.isArray(card?.options)
     ? card.options
@@ -30,11 +67,11 @@ function normalizeCard(card, usedIds) {
 
   let normalizedOptions = options;
   let answer = cleanString(card?.answer);
+  let hint = cleanString(card?.hint);
+  let explanation = cleanString(card?.explanation);
+  let matchingPairs = [];
 
-  if (type === "tap_reveal") {
-    normalizedOptions = [];
-    correctAnswerIndex = -1;
-  } else {
+  if (type === "multiple_choice") {
     normalizedOptions = options.slice(0, 4);
 
     if (
@@ -49,6 +86,22 @@ function normalizeCard(card, usedIds) {
     }
 
     answer = normalizedOptions[correctAnswerIndex];
+  } else {
+    normalizedOptions = [];
+    correctAnswerIndex = -1;
+  }
+
+  if (type === "matching") {
+    matchingPairs = normalizeMatchingPairs(card?.matchingPairs);
+    answer = "";
+    hint = "";
+    explanation = "";
+  }
+
+  if (type === "fill_blank") {
+    if (!answer) {
+      throw new Error("A fill-in-the-blank card must contain an answer.");
+    }
   }
 
   return {
@@ -56,10 +109,11 @@ function normalizeCard(card, usedIds) {
     type,
     prompt: cleanString(card?.prompt),
     answer,
-    hint: cleanString(card?.hint),
-    explanation: cleanString(card?.explanation),
+    hint,
+    explanation,
     options: normalizedOptions,
     correctAnswerIndex,
+    matchingPairs,
     difficulty: ["easy", "medium", "hard"].includes(card?.difficulty)
       ? card.difficulty
       : "medium",
@@ -76,7 +130,11 @@ function normalizeCard(card, usedIds) {
   };
 }
 
-export function normalizeGeneratedDeck(result, maxCards = LIMITS.MAX_CARDS) {
+export function normalizeGeneratedDeck(
+  result,
+  maxCards = LIMITS.MAX_CARDS,
+  validIds = null
+) {
   if (!result?.deck || !Array.isArray(result.deck.cards)) {
     throw new Error("AI returned an invalid deck.");
   }
@@ -84,7 +142,7 @@ export function normalizeGeneratedDeck(result, maxCards = LIMITS.MAX_CARDS) {
   const usedIds = new Set();
   const cards = result.deck.cards
     .slice(0, Math.min(maxCards, LIMITS.MAX_CARDS))
-    .map((card) => normalizeCard(card, usedIds));
+    .map((card) => normalizeCard(card, usedIds, validIds));
 
   if (cards.length === 0) {
     throw new Error("AI generated no usable cards.");

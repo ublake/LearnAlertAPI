@@ -1,71 +1,106 @@
-const CARD_SCHEMA = {
+const MATCHING_PAIR_SCHEMA = {
   type: "object",
   properties: {
-    id: {
+    left: {
       type: "string"
     },
-    type: {
-      type: "string",
-      enum: ["tap_reveal", "multiple_choice"]
-    },
-    prompt: {
-      type: "string"
-    },
-    answer: {
-      type: "string"
-    },
-    hint: {
-      type: "string"
-    },
-    explanation: {
-      type: "string"
-    },
-    options: {
-      type: "array",
-      items: {
-        type: "string"
-      },
-      minItems: 0,
-      maxItems: 4
-    },
-    correctAnswerIndex: {
-      type: "integer",
-      minimum: -1,
-      maximum: 3
-    },
-    difficulty: {
-      type: "string",
-      enum: ["easy", "medium", "hard"]
-    },
-    tags: {
-      type: "array",
-      items: {
-        type: "string"
-      },
-      maxItems: 8
-    },
-    sourceLocator: {
-      type: "string"
-    },
-    sourceExcerpt: {
+    right: {
       type: "string"
     }
   },
-  required: [
-    "id",
-    "type",
-    "prompt",
-    "answer",
-    "hint",
-    "explanation",
-    "options",
-    "correctAnswerIndex",
-    "difficulty",
-    "tags",
-    "sourceLocator",
-    "sourceExcerpt"
-  ],
+  required: ["left", "right"],
   additionalProperties: false
+};
+
+function cardSchema(type) {
+  const multipleChoice = type === "multiple_choice";
+  const matching = type === "matching";
+
+  return {
+    type: "object",
+    properties: {
+      id: {
+        type: "string"
+      },
+      type: {
+        type: "string",
+        enum: [type]
+      },
+      prompt: {
+        type: "string"
+      },
+      answer: {
+        type: "string"
+      },
+      hint: {
+        type: "string"
+      },
+      explanation: {
+        type: "string"
+      },
+      options: {
+        type: "array",
+        items: {
+          type: "string"
+        },
+        minItems: multipleChoice ? 4 : 0,
+        maxItems: multipleChoice ? 4 : 0
+      },
+      correctAnswerIndex: {
+        type: "integer",
+        minimum: multipleChoice ? 0 : -1,
+        maximum: multipleChoice ? 3 : -1
+      },
+      matchingPairs: {
+        type: "array",
+        items: MATCHING_PAIR_SCHEMA,
+        minItems: matching ? 2 : 0,
+        maxItems: matching ? 4 : 0
+      },
+      difficulty: {
+        type: "string",
+        enum: ["easy", "medium", "hard"]
+      },
+      tags: {
+        type: "array",
+        items: {
+          type: "string"
+        },
+        maxItems: 8
+      },
+      sourceLocator: {
+        type: "string"
+      },
+      sourceExcerpt: {
+        type: "string"
+      }
+    },
+    required: [
+      "id",
+      "type",
+      "prompt",
+      "answer",
+      "hint",
+      "explanation",
+      "options",
+      "correctAnswerIndex",
+      "matchingPairs",
+      "difficulty",
+      "tags",
+      "sourceLocator",
+      "sourceExcerpt"
+    ],
+    additionalProperties: false
+  };
+}
+
+const CARD_SCHEMA = {
+  anyOf: [
+    cardSchema("tap_reveal"),
+    cardSchema("multiple_choice"),
+    cardSchema("matching"),
+    cardSchema("fill_blank")
+  ]
 };
 
 const COVERAGE_SCHEMA = {

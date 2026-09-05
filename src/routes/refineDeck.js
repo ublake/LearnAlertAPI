@@ -12,13 +12,6 @@ export async function refineDeck(request, env, requestId) {
   const body = await request.json();
   const config = validateRefineRequest(body);
 
-  const historyText =
-    config.chatHistory.length > 0
-      ? config.chatHistory
-          .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
-          .join("\n")
-      : "No previous chat messages.";
-
   const sourceContext = config.sourceId
     ? "<source_note>The original uploaded source is attached to this request. Use it as the factual authority and inspect its original structure/visuals when relevant.</source_note>"
     : config.sourceText
@@ -34,10 +27,6 @@ ${config.maxCards}
 ${JSON.stringify(config.deck)}
 </current_deck>
 
-<recent_chat_history>
-${historyText}
-</recent_chat_history>
-
 <user_request>
 ${config.instruction}
 </user_request>
@@ -49,6 +38,7 @@ ${sourceContext}
 
   if (config.sourceId) {
     input = [
+      ...config.chatHistory,
       {
         role: "user",
         content: [
@@ -64,7 +54,13 @@ ${sourceContext}
       }
     ];
   } else {
-    input = contextText;
+    input = [
+      ...config.chatHistory,
+      {
+        role: "user",
+        content: contextText
+      }
+    ];
   }
 
   const ai = await callStructuredOutput({
@@ -77,14 +73,25 @@ ${sourceContext}
     reasoningEffort: "low"
   });
 
+  const validIds = new Set(
+    Array.isArray(config.deck.cards)
+      ? config.deck.cards
+          .map((card) => card?.id)
+          .filter((id) => typeof id === "string" && id.trim())
+          .map((id) => id.trim())
+      : []
+  );
+
   const normalized = normalizeGeneratedDeck(
     ai.value,
-    config.maxCards
+    config.maxCards,
+    validIds
   );
 
   return json({
     success: true,
     requestId,
+    action: "deck",
     ...(config.sourceId
       ? {
           sourceId: config.sourceId,

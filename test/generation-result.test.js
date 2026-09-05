@@ -39,6 +39,21 @@ test("uses a strict root object with a nullable nested deck", () => {
     true
   );
   assertStrictObjects(GENERATION_RESULT_SCHEMA);
+
+  const deckSchema = GENERATION_RESULT_SCHEMA.properties.deck.anyOf.find(
+    (branch) => branch.type === "object"
+  );
+  const cardSchemas = deckSchema.properties.cards.items.anyOf;
+  const matchingSchema = cardSchemas.find(
+    (schema) => schema.properties.type.enum[0] === "matching"
+  );
+
+  assert.deepEqual(
+    cardSchemas.map((schema) => schema.properties.type.enum[0]),
+    ["tap_reveal", "multiple_choice", "matching", "fill_blank"]
+  );
+  assert.equal(matchingSchema.properties.matchingPairs.minItems, 2);
+  assert.equal(matchingSchema.properties.matchingPairs.maxItems, 4);
 });
 
 test("normalizes a conversational generation response", () => {
@@ -166,7 +181,13 @@ test("generate endpoint returns the AI-selected chat action", async () => {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ text: "hello" })
+        body: JSON.stringify({
+          text: "hello",
+          chatHistory: [
+            { role: "user", content: "Create Spanish cards." },
+            { role: "assistant", content: "Send your notes." }
+          ]
+        })
       }),
       { OPENAI_API_KEY: "test-key" },
       "request-test"
@@ -186,6 +207,18 @@ test("generate endpoint returns the AI-selected chat action", async () => {
       requestBody.text.format.schema,
       GENERATION_RESULT_SCHEMA
     );
+    assert.deepEqual(requestBody.input.slice(0, 2), [
+      {
+        role: "user",
+        content: "Create Spanish cards."
+      },
+      {
+        role: "assistant",
+        content: "Send your notes."
+      }
+    ]);
+    assert.equal(requestBody.input[2].role, "user");
+    assert.match(requestBody.input[2].content, /<source_material>\nhello/);
   } finally {
     globalThis.fetch = originalFetch;
   }

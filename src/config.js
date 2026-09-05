@@ -13,7 +13,9 @@ export const LIMITS = {
 
 export const CARD_TYPES = [
   "tap_reveal",
-  "multiple_choice"
+  "multiple_choice",
+  "matching",
+  "fill_blank"
 ];
 
 export const MODES = [

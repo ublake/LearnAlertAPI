@@ -1,5 +1,6 @@
 import { GENERATION_RESULT_SCHEMA } from "../schemas.js";
 import { GENERATION_INSTRUCTIONS } from "../prompts.js";
+import { CARD_TYPES } from "../config.js";
 import {
   callStructuredOutput,
   uploadSourceFile,
@@ -21,7 +22,7 @@ function buildPreferences(config) {
     preferredCardTypes:
       config.preferredCardTypes.length > 0
         ? config.preferredCardTypes
-        : ["tap_reveal", "multiple_choice"],
+        : [...CARD_TYPES],
     userInstruction: config.userInstruction || "No additional instruction.",
     sourceName: config.sourceName || "Untitled source"
   };
@@ -49,6 +50,7 @@ export async function generateDeck(request, env, requestId) {
     };
 
     input = [
+      ...config.chatHistory,
       {
         role: "user",
         content: [
@@ -71,7 +73,11 @@ export async function generateDeck(request, env, requestId) {
     const body = await request.json();
     config = validateGenerateRequest(body);
 
-    input = `
+    input = [
+      ...config.chatHistory,
+      {
+        role: "user",
+        content: `
 <generation_preferences>
 ${JSON.stringify(buildPreferences(config), null, 2)}
 </generation_preferences>
@@ -79,7 +85,9 @@ ${JSON.stringify(buildPreferences(config), null, 2)}
 <source_material>
 ${config.text}
 </source_material>
-`.trim();
+`.trim()
+      }
+    ];
   }
 
   const ai = await callStructuredOutput({

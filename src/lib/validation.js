@@ -64,6 +64,45 @@ function parseFormStringArray(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function normalizeChatHistory(value) {
+  const rawHistory = Array.isArray(value)
+    ? value.slice(-LIMITS.MAX_CHAT_MESSAGES)
+    : [];
+
+  return rawHistory
+    .filter(
+      (message) =>
+        message &&
+        (message.role === "user" || message.role === "assistant") &&
+        typeof message.content === "string"
+    )
+    .map((message) => ({
+      role: message.role,
+      content: message.content
+        .trim()
+        .slice(0, LIMITS.MAX_CHAT_MESSAGE_CHARS)
+    }))
+    .filter((message) => message.content.length > 0);
+}
+
+function parseFormChatHistory(value) {
+  if (typeof value !== "string" || !value.trim()) return [];
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new ValidationError("chatHistory must be a valid JSON array.");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new ValidationError("chatHistory must be a valid JSON array.");
+  }
+
+  return normalizeChatHistory(parsed);
+}
+
 function commonGenerateOptions(body) {
   const maxCards = clampInteger(
     body?.maxCards,
@@ -85,6 +124,7 @@ function commonGenerateOptions(body) {
       body?.preferredCardTypes,
       CARD_TYPES
     ),
+    chatHistory: normalizeChatHistory(body?.chatHistory),
     userInstruction: optionalString(
       body?.userInstruction,
       LIMITS.MAX_USER_INSTRUCTION_CHARS
@@ -135,6 +175,9 @@ export function validateGenerateForm(formData) {
   const preferredCardTypes = parseFormStringArray(
     formData.get("preferredCardTypes")
   );
+  const chatHistory = parseFormChatHistory(
+    formData.get("chatHistory")
+  );
 
   const options = commonGenerateOptions({
     maxCards: formData.get("maxCards"),
@@ -142,6 +185,7 @@ export function validateGenerateForm(formData) {
     difficulty: formData.get("difficulty"),
     languageDirection: formData.get("languageDirection"),
     preferredCardTypes,
+    chatHistory,
     userInstruction: formData.get("userInstruction"),
     sourceName: formData.get("sourceName") || filename
   });
@@ -201,25 +245,6 @@ export function validateRefineRequest(body) {
     LIMITS.MAX_CARDS
   );
 
-  const rawHistory = Array.isArray(body.chatHistory)
-    ? body.chatHistory.slice(-LIMITS.MAX_CHAT_MESSAGES)
-    : [];
-
-  const chatHistory = rawHistory
-    .filter(
-      (message) =>
-        message &&
-        (message.role === "user" || message.role === "assistant") &&
-        typeof message.content === "string"
-    )
-    .map((message) => ({
-      role: message.role,
-      content: message.content
-        .trim()
-        .slice(0, LIMITS.MAX_CHAT_MESSAGE_CHARS)
-    }))
-    .filter((message) => message.content.length > 0);
-
   return {
     deck: body.deck,
     instruction,
@@ -228,7 +253,7 @@ export function validateRefineRequest(body) {
     sourceKind,
     sourceName,
     maxCards,
-    chatHistory
+    chatHistory: normalizeChatHistory(body.chatHistory)
   };
 }
 
