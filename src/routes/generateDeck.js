@@ -1,11 +1,11 @@
-import { DECK_SCHEMA } from "../schemas.js";
+import { GENERATION_RESULT_SCHEMA } from "../schemas.js";
 import { GENERATION_INSTRUCTIONS } from "../prompts.js";
 import {
   callStructuredOutput,
   uploadSourceFile,
   sourceContentItem
 } from "../lib/openai.js";
-import { normalizeGeneratedDeck } from "../lib/deck.js";
+import { normalizeGenerationResult } from "../lib/deck.js";
 import {
   validateGenerateRequest,
   validateGenerateForm
@@ -86,13 +86,13 @@ ${config.text}
     env,
     instructions: GENERATION_INSTRUCTIONS,
     input,
-    schema: DECK_SCHEMA,
-    schemaName: "learnalert_deck",
+    schema: GENERATION_RESULT_SCHEMA,
+    schemaName: "learnalert_generation_result",
     maxOutputTokens: 24_000,
     reasoningEffort: "low"
   });
 
-  const normalized = normalizeGeneratedDeck(
+  const normalized = normalizeGenerationResult(
     ai.value,
     config.maxCards
   );

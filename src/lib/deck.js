@@ -125,3 +125,36 @@ export function normalizeGeneratedDeck(result, maxCards = LIMITS.MAX_CARDS) {
     }
   };
 }
+
+export function normalizeGenerationResult(
+  result,
+  maxCards = LIMITS.MAX_CARDS
+) {
+  if (result?.action === "chat") {
+    if (result.deck !== null) {
+      throw new Error("AI returned a deck for a chat response.");
+    }
+
+    return {
+      action: "chat",
+      assistantMessage: cleanString(
+        result.assistantMessage,
+        "What would you like to study?"
+      ),
+      deck: null
+    };
+  }
+
+  if (result?.action !== "deck") {
+    throw new Error("AI returned an invalid generation action.");
+  }
+
+  if (!result.deck) {
+    throw new Error("AI returned no deck for a deck response.");
+  }
+
+  return {
+    action: "deck",
+    ...normalizeGeneratedDeck(result, maxCards)
+  };
+}

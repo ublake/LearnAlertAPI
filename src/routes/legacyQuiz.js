@@ -41,6 +41,26 @@ export async function legacyQuiz(request, env, requestId) {
     });
   }
 
+  if (data.action === "chat" || !data.deck) {
+    return new Response(
+      JSON.stringify(
+        {
+          success: true,
+          action: "chat",
+          assistantMessage: data.assistantMessage,
+          deck: null,
+          questions: []
+        },
+        null,
+        2
+      ),
+      {
+        status: 200,
+        headers: response.headers
+      }
+    );
+  }
+
   const questions = data.deck.cards
     .filter((card) => card.type === "multiple_choice")
     .map((card) => ({
@@ -55,6 +75,7 @@ export async function legacyQuiz(request, env, requestId) {
     JSON.stringify(
       {
         success: true,
+        action: "deck",
         deckTitle: data.deck.title,
         questions
       },

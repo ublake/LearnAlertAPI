@@ -102,52 +102,81 @@ const COVERAGE_SCHEMA = {
   additionalProperties: false
 };
 
+const DECK_OBJECT_SCHEMA = {
+  type: "object",
+  properties: {
+    title: {
+      type: "string"
+    },
+    subject: {
+      type: "string"
+    },
+    deckKind: {
+      type: "string",
+      enum: ["language_learning", "study", "mixed"]
+    },
+    detectedLanguage: {
+      type: "string"
+    },
+    summary: {
+      type: "string"
+    },
+    coverage: COVERAGE_SCHEMA,
+    cards: {
+      type: "array",
+      items: CARD_SCHEMA,
+      minItems: 1,
+      maxItems: 50
+    }
+  },
+  required: [
+    "title",
+    "subject",
+    "deckKind",
+    "detectedLanguage",
+    "summary",
+    "coverage",
+    "cards"
+  ],
+  additionalProperties: false
+};
+
 export const DECK_SCHEMA = {
   type: "object",
   properties: {
     assistantMessage: {
       type: "string"
     },
+    deck: DECK_OBJECT_SCHEMA
+  },
+  required: [
+    "assistantMessage",
+    "deck"
+  ],
+  additionalProperties: false
+};
+
+export const GENERATION_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: ["chat", "deck"]
+    },
+    assistantMessage: {
+      type: "string"
+    },
     deck: {
-      type: "object",
-      properties: {
-        title: {
-          type: "string"
-        },
-        subject: {
-          type: "string"
-        },
-        deckKind: {
-          type: "string",
-          enum: ["language_learning", "study", "mixed"]
-        },
-        detectedLanguage: {
-          type: "string"
-        },
-        summary: {
-          type: "string"
-        },
-        coverage: COVERAGE_SCHEMA,
-        cards: {
-          type: "array",
-          items: CARD_SCHEMA,
-          minItems: 1,
-          maxItems: 50
+      anyOf: [
+        DECK_OBJECT_SCHEMA,
+        {
+          type: "null"
         }
-      },
-      required: [
-        "title",
-        "subject",
-        "deckKind",
-        "detectedLanguage",
-        "summary",
-        "coverage",
-        "cards"
-      ],
-      additionalProperties: false
+      ]
     }
   },
   required: [
+    "action",
     "assistantMessage",
     "deck"
   ],

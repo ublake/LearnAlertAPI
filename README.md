@@ -54,6 +54,7 @@ Successful file generations include:
 ```json
 {
   "success": true,
+  "action": "deck",
   "sourceId": "file-abc123",
   "sourceKind": "file",
   "source": {
@@ -67,6 +68,23 @@ Successful file generations include:
   "deck": {}
 }
 ```
+
+The endpoint makes the relevance decision with the AI. If the supplied input is
+conversation rather than usable study material, it returns a chat response
+instead of manufacturing cards:
+
+```json
+{
+  "success": true,
+  "action": "chat",
+  "assistantMessage": "Hi! What would you like to study?",
+  "deck": null
+}
+```
+
+When usable study material is supplied, `action` is `"deck"` and `deck`
+contains the generated study deck. Clients should branch on `action` rather
+than implementing their own relevance heuristic.
 
 For images, `sourceKind` is `image` and the Responses API uses an image input instead of a document file input.
 
