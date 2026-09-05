@@ -2,7 +2,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Basic health check
+    // Health check
     if (request.method === "GET" && url.pathname === "/") {
       return json({
         ok: true,
@@ -10,12 +10,13 @@ export default {
       });
     }
 
-    // Generate quiz
+    // Quiz generation endpoint
     if (request.method === "POST" && url.pathname === "/generate-quiz") {
       try {
         const body = await request.json();
 
         const text = body.text?.trim();
+
         const questionCount = Math.min(
           Math.max(Number(body.questionCount) || 10, 1),
           30
@@ -23,30 +24,48 @@ export default {
 
         if (!text) {
           return json(
-            { error: "Missing text" },
+            {
+              error: "Missing text",
+            },
             400
           );
         }
 
-        // Prevent insane requests for now
+        // Basic limit for V1
         if (text.length > 50000) {
           return json(
-            { error: "Text is too long" },
+            {
+              error: "Text is too long",
+            },
             413
           );
         }
 
-        const response = await fetch(
+        if (!env.OPENAI_API_KEY) {
+          return json(
+            {
+              error: "OPENAI_API_KEY is not configured",
+            },
+            500
+          );
+        }
+
+        const openAIResponse = await fetch(
           "https://api.openai.com/v1/responses",
           {
             method: "POST",
+
             headers: {
-              "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+              Authorization: `Bearer ${env.OPENAI_API_KEY}`,
               "Content-Type": "application/json",
             },
 
             body: JSON.stringify({
               model: "gpt-5.6-luna",
+
+              reasoning: {
+                effort: "low",
+              },
 
               input: [
                 {
@@ -57,19 +76,22 @@ export default {
                       text: `
 You are the quiz-generation engine for LearnAlert.
 
-Create educational questions using ONLY the supplied study material.
+Your job is to turn study material into high-quality quiz questions.
 
-Rules:
-- Do not introduce facts unsupported by the supplied material.
-- Generate exactly the requested number of questions when possible.
-- Each question must have exactly 4 answer choices.
+RULES:
+
+- Use only information supported by the user's provided study material.
+- Do not invent facts.
+- Prioritize important concepts over trivial details.
+- Avoid duplicate or extremely similar questions.
+- Every question must have exactly 4 answer choices.
 - Exactly one answer must be correct.
-- Incorrect answers should be plausible.
+- Wrong answers should be plausible but clearly incorrect according to the material.
 - Every question must include a useful hint.
-- The hint must NOT reveal the answer.
-- Include a short explanation for the correct answer.
-- Avoid duplicate questions.
-- Prioritize important concepts instead of trivial details.
+- The hint should help the learner think but must not reveal the correct answer.
+- Every question must include a short explanation of why the correct answer is correct.
+- Generate the requested number of questions whenever the source material contains enough information.
+- Keep questions concise and useful for studying.
                       `.trim(),
                     },
                   ],
@@ -81,9 +103,13 @@ Rules:
                     {
                       type: "input_text",
                       text: `
-Generate ${questionCount} quiz questions from this material:
+Create ${questionCount} quiz questions from the following study material:
+
+--- BEGIN STUDY MATERIAL ---
 
 ${text}
+
+--- END STUDY MATERIAL ---
                       `.trim(),
                     },
                   ],
@@ -93,7 +119,9 @@ ${text}
               text: {
                 format: {
                   type: "json_schema",
+
                   name: "learnalert_quiz",
+
                   strict: true,
 
                   schema: {
@@ -121,11 +149,13 @@ ${text}
 
                             answers: {
                               type: "array",
-                              minItems: 4,
-                              maxItems: 4,
+
                               items: {
                                 type: "string",
                               },
+
+                              minItems: 4,
+                              maxItems: 4,
                             },
 
                             correctAnswerIndex: {
@@ -144,7 +174,7 @@ ${text}
                             "hint",
                             "answers",
                             "correctAnswerIndex",
-                            "explanation"
+                            "explanation",
                           ],
 
                           additionalProperties: false,
@@ -154,7 +184,7 @@ ${text}
 
                     required: [
                       "deckTitle",
-                      "questions"
+                      "questions",
                     ],
 
                     additionalProperties: false,
@@ -165,42 +195,100 @@ ${text}
           }
         );
 
-        const data = await response.json();
+        const data = await openAIResponse.json();
 
-        if (!response.ok) {
-          console.error("OpenAI error:", data);
+        // OpenAI itself returned an error
+        if (!openAIResponse.ok) {
+          console.error(
+            "OpenAI error:",
+            JSON.stringify(data)
+          );
 
           return json(
             {
               error: "AI generation failed",
               details: data,
             },
-            500
+            openAIResponse.status
           );
         }
 
-        const outputText = data.output_text;
+        // Raw fetch responses don't have the SDK's convenient
+        // response.output_text property.
+        // Find the output_text item inside output[].content[].
+        const outputText = data.output
+          ?.flatMap((item) => item.content || [])
+          ?.find(
+            (content) =>
+              content.type === "output_text"
+          )
+          ?.text;
 
         if (!outputText) {
-          console.error("No output_text:", data);
+          console.error(
+            "No output text:",
+            JSON.stringify(data)
+          );
 
           return json(
-            { error: "AI returned no quiz" },
+            {
+              error: "AI returned no quiz",
+              status: data.status,
+              debug: data,
+            },
             500
           );
         }
 
-        const quiz = JSON.parse(outputText);
+        let quiz;
 
-        return json(quiz);
+        try {
+          quiz = JSON.parse(outputText);
+        } catch (error) {
+          console.error(
+            "Failed to parse AI JSON:",
+            outputText
+          );
 
+          return json(
+            {
+              error: "Failed to parse quiz JSON",
+            },
+            500
+          );
+        }
+
+        // Extra sanity checking before returning it to the app
+        if (
+          !quiz.deckTitle ||
+          !Array.isArray(quiz.questions)
+        ) {
+          return json(
+            {
+              error: "AI returned an invalid quiz",
+            },
+            500
+          );
+        }
+
+        return json({
+          success: true,
+          deckTitle: quiz.deckTitle,
+          questions: quiz.questions,
+        });
       } catch (error) {
-        console.error(error);
+        console.error(
+          "Server error:",
+          error
+        );
 
         return json(
           {
             error: "Server error",
-            message: error.message,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
           },
           500
         );
@@ -208,7 +296,9 @@ ${text}
     }
 
     return json(
-      { error: "Not found" },
+      {
+        error: "Not found",
+      },
       404
     );
   },
@@ -217,11 +307,17 @@ ${text}
 
 function json(data, status = 200) {
   return new Response(
-    JSON.stringify(data),
+    JSON.stringify(data, null, 2),
     {
       status,
+
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type":
+          "application/json; charset=utf-8",
+
+        // Fine for development.
+        // Later we'll restrict this to your app/backend needs.
+        "Access-Control-Allow-Origin": "*",
       },
     }
   );
