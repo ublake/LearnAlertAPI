@@ -148,20 +148,18 @@ test("generate endpoint returns the AI-selected chat action", async () => {
     return new Response(
       JSON.stringify({
         id: "resp-test",
-        status: "completed",
         model: "test-model",
-        output: [
+        choices: [
           {
-            content: [
-              {
-                type: "output_text",
-                text: JSON.stringify({
-                  action: "chat",
-                  assistantMessage: "Hi! What would you like to study?",
-                  deck: null
-                })
-              }
-            ]
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                action: "chat",
+                assistantMessage: "Hi! What would you like to study?",
+                deck: null
+              })
+            }
           }
         ]
       }),
@@ -189,7 +187,7 @@ test("generate endpoint returns the AI-selected chat action", async () => {
           ]
         })
       }),
-      { OPENAI_API_KEY: "test-key" },
+      { CHEAPER_INFERENCE_API_KEY: "test-key" },
       "request-test"
     );
     const body = await response.json();
@@ -200,14 +198,15 @@ test("generate endpoint returns the AI-selected chat action", async () => {
     assert.equal(body.deck, null);
     assert.equal(body.assistantMessage, "Hi! What would you like to study?");
     assert.equal(
-      requestBody.text.format.name,
+      requestBody.response_format.json_schema.name,
       "learnalert_generation_result"
     );
     assert.deepEqual(
-      requestBody.text.format.schema,
+      requestBody.response_format.json_schema.schema,
       GENERATION_RESULT_SCHEMA
     );
-    assert.deepEqual(requestBody.input.slice(0, 2), [
+    assert.equal(requestBody.messages[0].role, "system");
+    assert.deepEqual(requestBody.messages.slice(1, 3), [
       {
         role: "user",
         content: "Create Spanish cards."
@@ -217,8 +216,8 @@ test("generate endpoint returns the AI-selected chat action", async () => {
         content: "Send your notes."
       }
     ]);
-    assert.equal(requestBody.input[2].role, "user");
-    assert.match(requestBody.input[2].content, /<source_material>\nhello/);
+    assert.equal(requestBody.messages[3].role, "user");
+    assert.match(requestBody.messages[3].content, /<source_material>\nhello/);
   } finally {
     globalThis.fetch = originalFetch;
   }

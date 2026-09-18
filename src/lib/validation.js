@@ -146,13 +146,7 @@ export function validateGenerateRequest(body) {
   };
 }
 
-export function validateGenerateForm(formData) {
-  const file = formData.get("file");
-
-  if (!(file instanceof File)) {
-    throw new ValidationError("file is required for multipart upload.");
-  }
-
+function validateUploadedFile(file) {
   if (file.size <= 0) {
     throw new ValidationError("The uploaded file is empty.");
   }
@@ -172,6 +166,24 @@ export function validateGenerateForm(formData) {
     );
   }
 
+  const mimeType = file.type || "application/octet-stream";
+
+  return {
+    filename,
+    mimeType,
+    sourceKind: mimeType.startsWith("image/") ? "image" : "file"
+  };
+}
+
+export function validateGenerateForm(formData) {
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    throw new ValidationError("file is required for multipart upload.");
+  }
+
+  const { filename, mimeType, sourceKind } = validateUploadedFile(file);
+
   const preferredCardTypes = parseFormStringArray(
     formData.get("preferredCardTypes")
   );
@@ -189,9 +201,6 @@ export function validateGenerateForm(formData) {
     userInstruction: formData.get("userInstruction"),
     sourceName: formData.get("sourceName") || filename
   });
-
-  const mimeType = file.type || "application/octet-stream";
-  const sourceKind = mimeType.startsWith("image/") ? "image" : "file";
 
   return {
     file,
@@ -222,11 +231,6 @@ export function validateRefineRequest(body) {
     LIMITS.MAX_SOURCE_CHARS
   );
 
-  const sourceId = optionalString(
-    body.sourceId || body?.source?.id,
-    200
-  );
-
   const sourceKind = enumValue(
     body.sourceKind || body?.source?.kind,
     ["file", "image"],
@@ -249,11 +253,57 @@ export function validateRefineRequest(body) {
     deck: body.deck,
     instruction,
     sourceText,
-    sourceId,
     sourceKind,
     sourceName,
     maxCards,
+    file: null,
+    mimeType: "",
     chatHistory: normalizeChatHistory(body.chatHistory)
+  };
+}
+
+/**
+ * Refining against the original document means re-sending it: the gateway is
+ * stateless, so there is no server-side copy to point at.
+ */
+export function validateRefineForm(formData) {
+  const rawDeck = formData.get("deck");
+
+  if (typeof rawDeck !== "string" || !rawDeck.trim()) {
+    throw new ValidationError("deck is required.");
+  }
+
+  let deck;
+
+  try {
+    deck = JSON.parse(rawDeck);
+  } catch {
+    throw new ValidationError("deck must be a valid JSON object.");
+  }
+
+  const config = validateRefineRequest({
+    deck,
+    instruction: formData.get("instruction"),
+    sourceText: formData.get("sourceText"),
+    sourceName: formData.get("sourceName"),
+    maxCards: formData.get("maxCards"),
+    chatHistory: parseFormChatHistory(formData.get("chatHistory"))
+  });
+
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    return config;
+  }
+
+  const { filename, mimeType, sourceKind } = validateUploadedFile(file);
+
+  return {
+    ...config,
+    file,
+    mimeType,
+    sourceKind,
+    sourceName: config.sourceName || filename
   };
 }
 

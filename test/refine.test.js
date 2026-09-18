@@ -14,14 +14,13 @@ test("refinement uses role-preserving history and returns a complete deck", asyn
     return new Response(
       JSON.stringify({
         id: "resp-refine-test",
-        status: "completed",
         model: "test-model",
-        output: [
+        choices: [
           {
-            content: [
-              {
-                type: "output_text",
-                text: JSON.stringify({
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
                   assistantMessage: "I converted the card to fill-in-the-blank.",
                   deck: {
                     title: "Geography",
@@ -54,8 +53,7 @@ test("refinement uses role-preserving history and returns a complete deck", asyn
                     ]
                   }
                 })
-              }
-            ]
+            }
           }
         ]
       }),
@@ -93,7 +91,7 @@ test("refinement uses role-preserving history and returns a complete deck", asyn
           ]
         })
       }),
-      { OPENAI_API_KEY: "test-key" },
+      { CHEAPER_INFERENCE_API_KEY: "test-key" },
       "request-refine-test"
     );
     const body = await response.json();
@@ -104,16 +102,20 @@ test("refinement uses role-preserving history and returns a complete deck", asyn
     assert.equal(body.deck.cards.length, 1);
     assert.equal(body.deck.cards[0].id, "card-1");
     assert.equal(body.deck.cards[0].type, "fill_blank");
-    assert.deepEqual(requestBody.input.slice(0, 2), [
+    assert.equal(requestBody.messages[0].role, "system");
+    assert.deepEqual(requestBody.messages.slice(1, 3), [
       { role: "user", content: "Focus on European capitals." },
       { role: "assistant", content: "The deck now focuses on Europe." }
     ]);
-    assert.equal(requestBody.input[2].role, "user");
+    assert.equal(requestBody.messages[3].role, "user");
     assert.match(
-      requestBody.input[2].content,
+      requestBody.messages[3].content,
       /Make that a fill-in-the-blank card\./
     );
-    assert.deepEqual(requestBody.text.format.schema, DECK_SCHEMA);
+    assert.deepEqual(
+      requestBody.response_format.json_schema.schema,
+      DECK_SCHEMA
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -4,5 +4,11 @@
   "compatibility_date": "2026-09-04",
   "observability": {
     "enabled": true
+  },
+  "vars": {
+    // The switcher: "cheaper_inference" or "openai".
+    "AI_PROVIDER": "cheaper_inference",
+    // Set to "true" to let a request pick the provider via X-AI-Provider.
+    "ALLOW_PROVIDER_OVERRIDE": "false"
   }
 }

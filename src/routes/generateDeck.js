@@ -3,9 +3,11 @@ import { GENERATION_INSTRUCTIONS } from "../prompts.js";
 import { CARD_TYPES } from "../config.js";
 import {
   callStructuredOutput,
-  uploadSourceFile,
-  sourceContentItem
-} from "../lib/openai.js";
+  encodeSourceFile,
+  resolveProvider,
+  sourceContentItem,
+  textContentItem
+} from "../lib/ai.js";
 import { normalizeGenerationResult } from "../lib/deck.js";
 import {
   validateGenerateRequest,
@@ -30,6 +32,10 @@ function buildPreferences(config) {
 
 export async function generateDeck(request, env, requestId) {
   const contentType = request.headers.get("content-type") || "";
+  const provider = resolveProvider(
+    env,
+    request.headers.get("x-ai-provider") || ""
+  );
 
   let config;
   let source = null;
@@ -39,14 +45,13 @@ export async function generateDeck(request, env, requestId) {
     const formData = await request.formData();
     config = validateGenerateForm(formData);
 
-    const uploaded = await uploadSourceFile(env, config.file);
+    const encoded = await encodeSourceFile(config.file, config.mimeType);
 
     source = {
-      id: uploaded.id,
       kind: config.sourceKind,
       name: config.sourceName,
-      mimeType: config.mimeType,
-      expiresAt: uploaded.expires_at || null
+      mimeType: encoded.mimeType,
+      byteSize: encoded.byteSize
     };
 
     input = [
@@ -54,16 +59,16 @@ export async function generateDeck(request, env, requestId) {
       {
         role: "user",
         content: [
-          {
-            type: "input_text",
-            text: `Generation preferences:\n${JSON.stringify(
+          textContentItem(
+            `Generation preferences:\n${JSON.stringify(
               buildPreferences(config),
               null,
               2
             )}\n\nAnalyze the attached original source directly. Preserve and use meaningful layout, tables, columns, diagrams, labels, and visual relationships when they affect the study content.`
-          },
+          ),
           sourceContentItem({
-            sourceId: source.id,
+            dataUrl: encoded.dataUrl,
+            filename: encoded.filename,
             sourceKind: source.kind
           })
         ]
@@ -92,6 +97,7 @@ ${config.text}
 
   const ai = await callStructuredOutput({
     env,
+    provider,
     instructions: GENERATION_INSTRUCTIONS,
     input,
     schema: GENERATION_RESULT_SCHEMA,
@@ -110,15 +116,15 @@ ${config.text}
     requestId,
     ...(source
       ? {
-          sourceId: source.id,
           sourceKind: source.kind,
           source
         }
       : {}),
     ...normalized,
     meta: {
+      provider: ai.provider,
       model: ai.model,
-      openAIResponseId: ai.responseId,
+      responseId: ai.responseId,
       usage: ai.usage
     }
   });

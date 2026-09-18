@@ -1,6 +1,11 @@
 import { apiError, json, optionsResponse } from "./lib/http.js";
 import { ValidationError } from "./lib/validation.js";
-import { OpenAIRequestError } from "./lib/openai.js";
+import {
+  AIRequestError,
+  isProviderConfigured,
+  providerNames
+} from "./lib/ai.js";
+import { DEFAULT_PROVIDER } from "./config.js";
 import { generateDeck } from "./routes/generateDeck.js";
 import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
@@ -19,6 +24,15 @@ export default {
         ok: true,
         service: "LearnAlert API",
         version: "1.1.0",
+        ai: {
+          active: env.AI_PROVIDER || DEFAULT_PROVIDER,
+          overrideAllowed: env.ALLOW_PROVIDER_OVERRIDE === "true",
+          // Which providers actually have a key, so a standby that was never
+          // given one does not look ready.
+          configured: providerNames().filter((name) =>
+            isProviderConfigured(env, name)
+          )
+        },
         endpoints: [
           "POST /v1/decks/generate",
           "POST /v1/decks/refine",
@@ -68,10 +82,10 @@ export default {
         );
       }
 
-      if (error instanceof OpenAIRequestError) {
+      if (error instanceof AIRequestError) {
         // Do not leak full upstream details to the app.
         console.error(
-          `[${requestId}] OpenAI details:`,
+          `[${requestId}] upstream details:`,
           error.details
         );
 

@@ -8,7 +8,7 @@ Documents and images can now be sent as their **original files** instead of bein
 
 Flow:
 
-`iOS file picker -> LearnAlert Cloudflare API -> OpenAI file input -> structured deck JSON`
+`iOS file picker -> LearnAlert Cloudflare API -> inline file input -> structured deck JSON`
 
 This preserves much more source structure for PDFs, slides, documents, tables, diagrams, screenshots, and images.
 
@@ -49,7 +49,8 @@ curl -X POST https://api.learnalertapp.com/v1/decks/generate \
   -F 'userInstruction=Focus on new vocabulary and important grammar.'
 ```
 
-The Worker uploads the file to OpenAI with `purpose=user_data` and a 24-hour expiration, then passes that file directly into the Responses API.
+The Worker base64-encodes the file and attaches it inline to a
+`POST /v1/chat/completions` call. Nothing is uploaded or stored upstream.
 
 Successful file generations include:
 
@@ -57,14 +58,12 @@ Successful file generations include:
 {
   "success": true,
   "action": "deck",
-  "sourceId": "file-abc123",
   "sourceKind": "file",
   "source": {
-    "id": "file-abc123",
     "kind": "file",
     "name": "SpanishModule.pdf",
     "mimeType": "application/pdf",
-    "expiresAt": 1780000000
+    "byteSize": 254119
   },
   "assistantMessage": "...",
   "deck": {}
@@ -88,7 +87,7 @@ When usable study material is supplied, `action` is `"deck"` and `deck`
 contains the generated study deck. Clients should branch on `action` rather
 than implementing their own relevance heuristic.
 
-For images, `sourceKind` is `image` and the Responses API uses an image input instead of a document file input.
+For images, `sourceKind` is `image` and the request uses an `image_url` content part instead of a `file` part.
 
 Supported upload extensions in this project:
 
@@ -136,7 +135,7 @@ The original JSON text flow still works:
 }
 ```
 
-Generation and refinement pass `chatHistory` to OpenAI as role-preserving
+Generation and refinement pass `chatHistory` upstream as role-preserving
 conversation messages. At most the latest 12 non-empty user/assistant messages
 are used, and each message is limited to 1,500 characters.
 
@@ -196,14 +195,26 @@ Chat-style editing of the current generated deck.
 Successful refinement returns `action: "deck"` and the complete updated deck,
 including unchanged cards. Valid existing card IDs are preserved where possible.
 
-For a deck originally generated from a file, send the `sourceId` and `sourceKind` returned by generation so the original source can be attached again without uploading it from the phone a second time.
+For a deck originally generated from a file, resend the file as
+`multipart/form-data` so it can be attached again. There is no server-side copy
+to point at: the upstream gateway is stateless and has no file storage.
+
+```bash
+curl -X POST https://api.learnalertapp.com/v1/decks/refine \
+  -F 'file=@SpanishModule.pdf' \
+  -F 'instruction=Make these harder and focus more on nouns.' \
+  -F 'maxCards=50' \
+  -F 'deck={"title":"...","cards":[]}' \
+  -F 'chatHistory=[{"role":"user","content":"Focus more on vocabulary."}]'
+```
+
+The JSON form is unchanged when no file is attached:
 
 ```json
 {
   "instruction": "Make these harder and focus more on nouns.",
   "maxCards": 50,
-  "sourceId": "file-abc123",
-  "sourceKind": "file",
+  "sourceText": "la mesa = table",
   "sourceName": "SpanishModule.pdf",
   "deck": {
     "...": "the current deck object"
@@ -221,37 +232,85 @@ For a deck originally generated from a file, send the `sourceId` and `sourceKind
 }
 ```
 
-You may alternatively send the returned `source` object:
-
-```json
-{
-  "source": {
-    "id": "file-abc123",
-    "kind": "file",
-    "name": "SpanishModule.pdf"
-  }
-}
-```
-
-For pasted text, refinement can continue using `sourceText` instead.
+For pasted text, refinement can continue using `sourceText` instead. A request
+that carries neither a file nor `sourceText` is still refined, but only against
+the current deck: the model is told not to introduce new factual claims.
 
 ### POST /generate-quiz
 
 Legacy compatibility endpoint for the earlier LearnAlert integration. It still accepts extracted text.
 
-## Cloudflare secret
+## Upstream provider
 
-Keep this Cloudflare Worker secret:
+Every call is a plain `POST /v1/chat/completions`, which both providers accept
+with an identical body. Switching is therefore only a change of host and key.
 
-`OPENAI_API_KEY`
+| Provider | `AI_PROVIDER` | Base URL | Secret |
+| --- | --- | --- | --- |
+| Cheaper Inference (default) | `cheaper_inference` | `https://api.cheaperinference.com/v1` | `CHEAPER_INFERENCE_API_KEY` |
+| OpenAI (standby) | `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
 
-Never put it in GitHub or the iOS app.
+Both are declared in `src/config.js`. The model is `gpt-5.6-luna` on either.
+
+### Switching
+
+`AI_PROVIDER` in `wrangler.jsonc` is the setting. Change it and redeploy:
+
+```bash
+npx wrangler deploy
+```
+
+Keep both secrets set so the standby is genuinely ready to take over:
+
+```bash
+npx wrangler secret put CHEAPER_INFERENCE_API_KEY
+npx wrangler secret put OPENAI_API_KEY
+```
+
+There is no cross-provider key fallback: whichever provider is selected must
+have its own secret, or the request fails with a 500 that names the missing
+variable before any upstream call is made. `GET /` reports which provider is
+active and which ones actually have a key:
+
+```json
+{
+  "ai": {
+    "active": "cheaper_inference",
+    "overrideAllowed": false,
+    "configured": ["cheaper_inference", "openai"]
+  }
+}
+```
+
+Every generation and refinement response also reports what served it, in
+`meta.provider` and `meta.model`.
+
+### Other overrides
+
+- `AI_MODEL` — use a different model than the provider default.
+- `AI_BASE_URL` — point a provider at a different host.
+- `ALLOW_PROVIDER_OVERRIDE` — when `"true"`, a request may select the provider
+  with an `X-AI-Provider: openai` header. Useful for smoke-testing the standby
+  without redeploying. Leave it `"false"` in production, or callers choose who
+  you pay.
+
+```bash
+curl -X POST https://api.learnalertapp.com/v1/decks/generate \
+  -H 'Content-Type: application/json' \
+  -H 'X-AI-Provider: openai' \
+  -d '{"text":"la mesa = table"}'
+```
+
+Never put either secret in GitHub or the iOS app.
 
 ## Important behavior
 
-Uploaded OpenAI source files are configured to expire after **24 hours**. That means AI chat/refinement can reuse the original document during the generation/review session without permanently storing it in LearnAlert.
+The gateway is stateless and zero-retention: there is no `/v1/files` endpoint,
+so source bytes are sent inline on every request and nothing persists upstream.
 
-If you want deck chat to continue days later against the original source, add durable private file storage later (for example R2) and re-upload to OpenAI when needed.
+That means refinement days later needs the file resent from the device. If you
+want the Worker to hold it instead, add durable private storage (for example R2)
+keyed by a source id, and inline the bytes from there.
 
 ## iOS integration change
 
@@ -259,10 +318,13 @@ For files/photos, stop extracting the document to text before generation. Send t
 
 For pasted notes, keep using the JSON text request.
 
-When generation returns `sourceId`, `sourceKind`, and `source`, keep those in temporary generation/review state. Send them back to `/v1/decks/refine` while the user chats with the AI.
+Keep the picked file around for the generation/review session. While the user
+chats with the AI, resend it to `/v1/decks/refine` as multipart form data so
+refinement can still see the original document. Generation no longer returns a
+`sourceId`, and a stale one is ignored.
 
 Send recent `chatHistory` on every generation/refinement turn so follow-up
 messages retain their user/assistant roles. Decode all four card types and include
 `matchingPairs: []` on non-matching cards when sending a deck back for refinement.
 
-Do not persist OpenAI credentials anywhere in the app.
+Do not persist upstream API credentials anywhere in the app.

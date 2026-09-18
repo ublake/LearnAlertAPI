@@ -2,18 +2,31 @@ import { DECK_SCHEMA } from "../schemas.js";
 import { REFINE_INSTRUCTIONS } from "../prompts.js";
 import {
   callStructuredOutput,
-  sourceContentItem
-} from "../lib/openai.js";
+  encodeSourceFile,
+  resolveProvider,
+  sourceContentItem,
+  textContentItem
+} from "../lib/ai.js";
 import { normalizeGeneratedDeck } from "../lib/deck.js";
-import { validateRefineRequest } from "../lib/validation.js";
+import {
+  validateRefineRequest,
+  validateRefineForm
+} from "../lib/validation.js";
 import { json } from "../lib/http.js";
 
 export async function refineDeck(request, env, requestId) {
-  const body = await request.json();
-  const config = validateRefineRequest(body);
+  const contentType = request.headers.get("content-type") || "";
+  const provider = resolveProvider(
+    env,
+    request.headers.get("x-ai-provider") || ""
+  );
 
-  const sourceContext = config.sourceId
-    ? "<source_note>The original uploaded source is attached to this request. Use it as the factual authority and inspect its original structure/visuals when relevant.</source_note>"
+  const config = contentType.includes("multipart/form-data")
+    ? validateRefineForm(await request.formData())
+    : validateRefineRequest(await request.json());
+
+  const sourceContext = config.file
+    ? "<source_note>The original source is attached to this request. Use it as the factual authority and inspect its original structure/visuals when relevant.</source_note>"
     : config.sourceText
       ? `<source_material name="${config.sourceName || "source"}">\n${config.sourceText}\n</source_material>`
       : "<source_material>No source material was supplied. Do not introduce new factual claims beyond what is already supported by the current deck.</source_material>";
@@ -34,21 +47,29 @@ ${config.instruction}
 ${sourceContext}
 `.trim();
 
+  let source = null;
   let input;
 
-  if (config.sourceId) {
+  if (config.file) {
+    const encoded = await encodeSourceFile(config.file, config.mimeType);
+
+    source = {
+      kind: config.sourceKind,
+      name: config.sourceName || encoded.filename,
+      mimeType: encoded.mimeType,
+      byteSize: encoded.byteSize
+    };
+
     input = [
       ...config.chatHistory,
       {
         role: "user",
         content: [
-          {
-            type: "input_text",
-            text: contextText
-          },
+          textContentItem(contextText),
           sourceContentItem({
-            sourceId: config.sourceId,
-            sourceKind: config.sourceKind
+            dataUrl: encoded.dataUrl,
+            filename: encoded.filename,
+            sourceKind: source.kind
           })
         ]
       }
@@ -65,6 +86,7 @@ ${sourceContext}
 
   const ai = await callStructuredOutput({
     env,
+    provider,
     instructions: REFINE_INSTRUCTIONS,
     input,
     schema: DECK_SCHEMA,
@@ -92,21 +114,17 @@ ${sourceContext}
     success: true,
     requestId,
     action: "deck",
-    ...(config.sourceId
+    ...(source
       ? {
-          sourceId: config.sourceId,
-          sourceKind: config.sourceKind,
-          source: {
-            id: config.sourceId,
-            kind: config.sourceKind,
-            name: config.sourceName || ""
-          }
+          sourceKind: source.kind,
+          source
         }
       : {}),
     ...normalized,
     meta: {
+      provider: ai.provider,
       model: ai.model,
-      openAIResponseId: ai.responseId,
+      responseId: ai.responseId,
       usage: ai.usage
     }
   });
