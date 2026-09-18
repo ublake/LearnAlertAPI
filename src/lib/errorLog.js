@@ -48,3 +48,18 @@ export function listErrors(now = Date.now()) {
 export function errorLogTtlSeconds() {
   return TTL_MS / 1000;
 }
+
+/**
+ * Debug access is opt-in and token-gated: `details` can quote upstream
+ * payloads and user content, so it is never exposed without DEBUG_TOKEN set
+ * and presented.
+ */
+export function isDebugAuthorized(request, env) {
+  if (!env.DEBUG_TOKEN) return false;
+
+  const url = new URL(request.url);
+  const supplied =
+    request.headers.get("x-debug-token") || url.searchParams.get("token") || "";
+
+  return supplied === env.DEBUG_TOKEN;
+}

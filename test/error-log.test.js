@@ -226,3 +226,47 @@ test("an over-length field reports what it actually received", async () => {
   assert.equal(entry.details.received, 8_000);
   assert.equal(entry.details.startsWith.length, 120);
 });
+
+test("details reach an authorized caller in the response itself", async () => {
+  const env = { ...ENABLED, DEBUG_TOKEN: "s3cret" };
+
+  function refineRequest(headers = {}) {
+    return new Request("https://api.example/v1/decks/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({
+        deck: { cards: [] },
+        instruction: "B".repeat(2_027)
+      })
+    });
+  }
+
+  // Without the token, details stay server-side.
+  const plain = await (await worker.fetch(refineRequest(), env)).json();
+  assert.equal(plain.error.details, undefined);
+  assert.match(plain.error.message, /2,027 characters/);
+
+  // With it, the app can show them without any isolate involved.
+  const debug = await (
+    await worker.fetch(refineRequest({ "X-Debug-Token": "s3cret" }), env)
+  ).json();
+
+  assert.equal(debug.error.details.field, "instruction");
+  assert.equal(debug.error.details.received, 2_027);
+  assert.equal(debug.error.details.startsWith.length, 120);
+  assert.equal(debug.error.details.endsWith.length, 120);
+});
+
+test("a wrong debug token reveals nothing", async () => {
+  const response = await worker.fetch(
+    new Request("https://api.example/v1/decks/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Token": "wrong" },
+      body: JSON.stringify({ deck: { cards: [] }, instruction: "B".repeat(3000) })
+    }),
+    { ...ENABLED, DEBUG_TOKEN: "s3cret" }
+  );
+  const body = await response.json();
+
+  assert.equal(body.error.details, undefined);
+});

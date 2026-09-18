@@ -1,4 +1,8 @@
-import { listErrors, errorLogTtlSeconds } from "../lib/errorLog.js";
+import {
+  listErrors,
+  errorLogTtlSeconds,
+  isDebugAuthorized
+} from "../lib/errorLog.js";
 
 function escapeHtml(value) {
   return String(value).replace(
@@ -23,11 +27,7 @@ export function isErrorsPageAllowed(request, env) {
   if (env.ERROR_LOG_ENABLED !== "true") return false;
   if (!env.DEBUG_TOKEN) return true;
 
-  const url = new URL(request.url);
-  const supplied =
-    request.headers.get("x-debug-token") || url.searchParams.get("token") || "";
-
-  return supplied === env.DEBUG_TOKEN;
+  return isDebugAuthorized(request, env);
 }
 
 function renderRow(entry) {

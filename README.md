@@ -316,10 +316,30 @@ Each entry carries the error code, HTTP status, message, request id, route, and
 the internal `details` that are deliberately withheld from the app's response —
 upstream payloads, token counts, and the like.
 
-**This is best-effort.** The log lives in the memory of one Cloudflare isolate.
-Cloudflare runs many short-lived isolates per region, so the page shows what the
-isolate answering *that* request happened to see. An error missing here may
-still have happened. For the authoritative stream:
+**This page cannot see errors from another device.** The log lives in the
+memory of one Cloudflare isolate. A request from a phone and a browser request
+from a laptop hit different colos and therefore different isolates, so an error
+from the app will usually *not* appear on a page you open on your computer.
+Treat `/errors` as useful only for errors you cause from the same client.
+
+For debugging the app, use one of these two instead:
+
+**1. Inline details (best for the app's own diagnostics screen).** Set a
+`DEBUG_TOKEN` secret and send it as an `X-Debug-Token` header. The error
+response then carries `error.details` directly, with no isolate involved:
+
+```json
+{ "success": false, "requestId": "...",
+  "error": { "code": "VALIDATION_ERROR",
+             "message": "instruction is too long: 2,027 characters, maximum is 2,000.",
+             "details": { "field": "instruction", "received": 2027,
+                          "startsWith": "...", "endsWith": "..." } } }
+```
+
+Without a valid token the `details` key is absent. Ship the token only in
+internal builds.
+
+**2. The live stream**, which cannot miss:
 
 ```bash
 npx wrangler tail

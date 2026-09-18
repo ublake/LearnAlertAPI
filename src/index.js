@@ -7,7 +7,7 @@ import {
   providerNames
 } from "./lib/ai.js";
 import { DEFAULT_PROVIDER, DEFAULT_DOCUMENT_PROVIDER } from "./config.js";
-import { recordError } from "./lib/errorLog.js";
+import { recordError, isDebugAuthorized } from "./lib/errorLog.js";
 import { errorsPage, isErrorsPageAllowed } from "./routes/errorsPage.js";
 import { extractSource } from "./routes/extractSource.js";
 import { generateDeck } from "./routes/generateDeck.js";
@@ -159,7 +159,16 @@ export default {
         path: url.pathname
       });
 
-      return apiError(code, message, status, requestId);
+      // An authorized caller gets the details in the response itself. The
+      // in-memory log lives in one isolate, so a phone error is usually
+      // invisible to a browser hitting a different colo.
+      return apiError(
+        code,
+        message,
+        status,
+        requestId,
+        isDebugAuthorized(request, env) ? details : null
+      );
     }
   }
 };
