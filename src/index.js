@@ -1,5 +1,6 @@
 import { apiError, json, optionsResponse } from "./lib/http.js";
 import { ValidationError } from "./lib/validation.js";
+import { DeckError } from "./lib/deck.js";
 import {
   AIRequestError,
   isProviderConfigured,
@@ -30,6 +31,16 @@ function classify(error) {
       status:
         error.status >= 400 && error.status < 600 ? error.status : 502,
       details: error.details || null
+    };
+  }
+
+  // Unusable model output is an upstream problem, not a server fault.
+  if (error instanceof DeckError) {
+    return {
+      code: "AI_INVALID_OUTPUT",
+      message: error.message,
+      status: 502,
+      details: null
     };
   }
 

@@ -423,7 +423,31 @@ Three different layers can fail, and they surface differently:
 | --- | --- | --- |
 | Request validation (this Worker) | `VALIDATION_ERROR`, HTTP 400 | response body, `/errors`, `wrangler tail` |
 | Upstream provider | `AI_REQUEST_FAILED` with the provider's message | same, plus the provider dashboard |
-| Our handling of a good response | `AI_REQUEST_FAILED`, HTTP 502 | same, but **not** the provider dashboard |
+| Model returned unusable content | `AI_INVALID_OUTPUT`, HTTP 502 | same, but **not** the provider dashboard |
+| Our handling of a good response | `AI_REQUEST_FAILED`, HTTP 502 | same |
+| A genuine bug in this Worker | `INTERNAL_ERROR`, HTTP 500 | `/errors` and `wrangler tail` only |
+
+`INTERNAL_ERROR` means an unexpected exception and should be treated as a bug
+report: the message the app receives is deliberately generic, and the real
+exception is in `/errors` under the same `requestId`.
+
+### Partial decks
+
+A single malformed card no longer discards the whole deck. Cards that fail
+validation are dropped, the rest are kept, and the response reports what went:
+
+```json
+{
+  "droppedCards": [
+    { "type": "matching", "reason": "A matching card must contain unique left and right values." }
+  ]
+}
+```
+
+Matching cards with a repeated term are repaired first — the duplicate pair is
+removed, and the card is only dropped if fewer than two pairs survive.
+`coverage.cardsCreated` always reflects what you actually received.
+`AI_INVALID_OUTPUT` is returned only when *no* card survives.
 
 That third row is the confusing one. If the provider shows a request as
 `settled` but your app shows an error, the upstream call succeeded and was

@@ -1,12 +1,18 @@
 import { LIMITS } from "../config.js";
 
+/** A single card is unusable. The rest of the deck is unaffected. */
+export class CardError extends Error {}
+
+/** The whole response is unusable. */
+export class DeckError extends Error {}
+
 function cleanString(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
 
 function normalizeMatchingPairs(value) {
   if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
-    throw new Error("A matching card must contain 2 to 4 complete pairs.");
+    throw new CardError("A matching card must contain 2 to 4 complete pairs.");
   }
 
   const pairs = value.map((pair) => ({
@@ -15,21 +21,29 @@ function normalizeMatchingPairs(value) {
   }));
 
   if (pairs.some((pair) => !pair.left || !pair.right)) {
-    throw new Error("A matching card must contain 2 to 4 complete pairs.");
+    throw new CardError("A matching card must contain 2 to 4 complete pairs.");
   }
 
-  const leftValues = new Set(
-    pairs.map((pair) => pair.left.toLowerCase())
-  );
-  const rightValues = new Set(
-    pairs.map((pair) => pair.right.toLowerCase())
-  );
+  // A repeated term makes the card ambiguous, but the other pairs are still
+  // good. Drop the duplicates and keep the card if enough survive.
+  const seenLeft = new Set();
+  const seenRight = new Set();
+  const unique = pairs.filter((pair) => {
+    const left = pair.left.toLowerCase();
+    const right = pair.right.toLowerCase();
 
-  if (leftValues.size !== pairs.length || rightValues.size !== pairs.length) {
-    throw new Error("A matching card must contain unique left and right values.");
+    if (seenLeft.has(left) || seenRight.has(right)) return false;
+
+    seenLeft.add(left);
+    seenRight.add(right);
+    return true;
+  });
+
+  if (unique.length < 2) {
+    throw new CardError("A matching card must contain unique left and right values.");
   }
 
-  return pairs;
+  return unique;
 }
 
 function normalizeCard(card, usedIds, validIds = null) {
@@ -78,11 +92,11 @@ function normalizeCard(card, usedIds, validIds = null) {
       normalizedOptions.length !== 4 ||
       new Set(normalizedOptions).size !== 4
     ) {
-      throw new Error("A multiple-choice card did not contain 4 distinct options.");
+      throw new CardError("A multiple-choice card did not contain 4 distinct options.");
     }
 
     if (correctAnswerIndex < 0 || correctAnswerIndex > 3) {
-      throw new Error("A multiple-choice card had an invalid correctAnswerIndex.");
+      throw new CardError("A multiple-choice card had an invalid correctAnswerIndex.");
     }
 
     answer = normalizedOptions[correctAnswerIndex];
@@ -100,7 +114,7 @@ function normalizeCard(card, usedIds, validIds = null) {
 
   if (type === "fill_blank") {
     if (!answer) {
-      throw new Error("A fill-in-the-blank card must contain an answer.");
+      throw new CardError("A fill-in-the-blank card must contain an answer.");
     }
   }
 
@@ -136,16 +150,28 @@ export function normalizeGeneratedDeck(
   validIds = null
 ) {
   if (!result?.deck || !Array.isArray(result.deck.cards)) {
-    throw new Error("AI returned an invalid deck.");
+    throw new DeckError("AI returned an invalid deck.");
   }
 
   const usedIds = new Set();
-  const cards = result.deck.cards
-    .slice(0, Math.min(maxCards, LIMITS.MAX_CARDS))
-    .map((card) => normalizeCard(card, usedIds, validIds));
+  const cards = [];
+  const dropped = [];
+
+  // One malformed card must not cost the user the whole deck.
+  for (const card of result.deck.cards.slice(
+    0,
+    Math.min(maxCards, LIMITS.MAX_CARDS)
+  )) {
+    try {
+      cards.push(normalizeCard(card, usedIds, validIds));
+    } catch (error) {
+      if (!(error instanceof CardError)) throw error;
+      dropped.push({ type: card?.type ?? "unknown", reason: error.message });
+    }
+  }
 
   if (cards.length === 0) {
-    throw new Error("AI generated no usable cards.");
+    throw new DeckError("AI generated no usable cards.");
   }
 
   const coverage = result.deck.coverage || {};
@@ -180,7 +206,10 @@ export function normalizeGeneratedDeck(
           : []
       },
       cards
-    }
+    },
+    // Visible rather than silent: a deck that quietly lost cards should be
+    // debuggable without diffing against the upstream response.
+    droppedCards: dropped
   };
 }
 
@@ -190,7 +219,7 @@ export function normalizeGenerationResult(
 ) {
   if (result?.action === "chat") {
     if (result.deck !== null) {
-      throw new Error("AI returned a deck for a chat response.");
+      throw new DeckError("AI returned a deck for a chat response.");
     }
 
     return {
@@ -204,11 +233,11 @@ export function normalizeGenerationResult(
   }
 
   if (result?.action !== "deck") {
-    throw new Error("AI returned an invalid generation action.");
+    throw new DeckError("AI returned an invalid generation action.");
   }
 
   if (!result.deck) {
-    throw new Error("AI returned no deck for a deck response.");
+    throw new DeckError("AI returned no deck for a deck response.");
   }
 
   return {

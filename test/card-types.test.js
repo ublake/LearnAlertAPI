@@ -60,32 +60,86 @@ test("normalizes a matching card with 2 to 4 unique pairs", () => {
   ]);
 });
 
-test("rejects ambiguous or out-of-range matching pairs", () => {
-  const matchingCard = {
-    id: "matching-1",
-    type: "matching",
-    prompt: "Match the pairs.",
-    matchingPairs: [
-      { left: "One", right: "Uno" },
-      { left: "one", right: "Ein" }
-    ]
-  };
-
-  assert.throws(
-    () => normalizeGeneratedDeck(resultWithCards([matchingCard])),
-    /unique left and right values/
+test("a repeated term is dropped but the card survives", () => {
+  const normalized = normalizeGeneratedDeck(
+    resultWithCards([
+      {
+        id: "matching-1",
+        type: "matching",
+        prompt: "Match the pairs.",
+        matchingPairs: [
+          { left: "One", right: "Uno" },
+          { left: "Two", right: "Dos" },
+          // "one" duplicates "One": ambiguous, so this pair goes.
+          { left: "one", right: "Ein" }
+        ]
+      }
+    ])
   );
+
+  assert.deepEqual(normalized.deck.cards[0].matchingPairs, [
+    { left: "One", right: "Uno" },
+    { left: "Two", right: "Dos" }
+  ]);
+  assert.deepEqual(normalized.droppedCards, []);
+});
+
+test("an unsalvageable card is dropped without killing the deck", () => {
+  const normalized = normalizeGeneratedDeck(
+    resultWithCards([
+      {
+        id: "good-1",
+        type: "tap_reveal",
+        prompt: "Capital of France",
+        answer: "Paris"
+      },
+      {
+        // Dedupes down to one pair, which is not a matching card.
+        id: "matching-1",
+        type: "matching",
+        prompt: "Match the pairs.",
+        matchingPairs: [
+          { left: "One", right: "Uno" },
+          { left: "one", right: "Ein" }
+        ]
+      },
+      {
+        id: "bad-mc",
+        type: "multiple_choice",
+        prompt: "Pick one",
+        options: ["a", "a", "b", "c"],
+        correctAnswerIndex: 0
+      }
+    ])
+  );
+
+  // The good card survives. This is the whole point of the change.
+  assert.equal(normalized.deck.cards.length, 1);
+  assert.equal(normalized.deck.cards[0].id, "good-1");
+  assert.equal(normalized.deck.coverage.cardsCreated, 1);
+
+  assert.equal(normalized.droppedCards.length, 2);
+  assert.deepEqual(
+    normalized.droppedCards.map((entry) => entry.type),
+    ["matching", "multiple_choice"]
+  );
+  assert.match(normalized.droppedCards[0].reason, /unique left and right/);
+});
+
+test("a deck with no salvageable cards still fails", () => {
   assert.throws(
     () =>
       normalizeGeneratedDeck(
         resultWithCards([
           {
-            ...matchingCard,
+            id: "matching-1",
+            type: "matching",
+            prompt: "Match the pairs.",
             matchingPairs: [{ left: "One", right: "Uno" }]
           }
         ])
       ),
-    /2 to 4 complete pairs/
+    /no usable cards/
   );
 });
 

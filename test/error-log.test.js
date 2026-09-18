@@ -147,3 +147,47 @@ test("HTML output escapes error text", async () => {
   assert.equal(html.includes("<script>alert(1)</script>"), false);
   assert.match(html, /&lt;script&gt;/);
 });
+
+test("unusable model output is a 502, not an INTERNAL_ERROR", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        id: "resp-bad-deck",
+        model: "test-model",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                action: "deck",
+                assistantMessage: "Here you go.",
+                deck: null
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://api.example/v1/decks/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "la mesa = table" })
+      }),
+      ENABLED
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 502);
+    assert.equal(body.error.code, "AI_INVALID_OUTPUT");
+    // The old behaviour hid this behind "Something went wrong".
+    assert.match(body.error.message, /no deck for a deck response/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
