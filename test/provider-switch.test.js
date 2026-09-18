@@ -187,3 +187,53 @@ test("the health check reports the active and standby providers", async () => {
   // Cheaper Inference has no key here, so it must not look ready.
   assert.deepEqual(body.ai.configured, ["openai"]);
 });
+
+test("DOCUMENT_PROVIDER applies even when AI_PROVIDER is set", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = stubFetch();
+
+  const form = new FormData();
+  form.append(
+    "file",
+    new File([new Uint8Array([1, 2, 3])], "notes.pdf", {
+      type: "application/pdf"
+    })
+  );
+
+  try {
+    await generateDeck(
+      new Request("https://api.example/v1/decks/generate", {
+        method: "POST",
+        body: form
+      }),
+      {
+        // Both set: text follows one, documents the other.
+        AI_PROVIDER: "cheaper_inference",
+        DOCUMENT_PROVIDER: "openai",
+        CHEAPER_INFERENCE_API_KEY: "ci_live",
+        OPENAI_API_KEY: "sk-test"
+      },
+      "request-doc-provider"
+    );
+
+    assert.equal(calls.url, "https://api.openai.com/v1/chat/completions");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the health check reports the document provider separately", async () => {
+  const response = await worker.fetch(
+    new Request("https://api.example/", { method: "GET" }),
+    {
+      AI_PROVIDER: "cheaper_inference",
+      DOCUMENT_PROVIDER: "openai",
+      CHEAPER_INFERENCE_API_KEY: "ci_live",
+      OPENAI_API_KEY: "sk-test"
+    }
+  );
+  const body = await response.json();
+
+  assert.equal(body.ai.active, "cheaper_inference");
+  assert.equal(body.ai.documents, "openai");
+});

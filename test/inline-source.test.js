@@ -4,6 +4,11 @@ import assert from "node:assert/strict";
 import { generateDeck } from "../src/routes/generateDeck.js";
 import { refineDeck } from "../src/routes/refineDeck.js";
 
+const BOTH_KEYS = {
+  CHEAPER_INFERENCE_API_KEY: "ci_live_test",
+  OPENAI_API_KEY: "sk-test"
+};
+
 const DECK_PAYLOAD = {
   assistantMessage: "Done.",
   deck: {
@@ -86,16 +91,14 @@ test("multipart generation inlines a PDF as a base64 data URL", async () => {
         method: "POST",
         body: form
       }),
-      { CHEAPER_INFERENCE_API_KEY: "ci_live_test" },
+      BOTH_KEYS,
       "request-inline-pdf"
     );
     const body = await response.json();
 
-    assert.equal(
-      calls.url,
-      "https://api.cheaperinference.com/v1/chat/completions"
-    );
-    assert.equal(calls.headers.Authorization, "Bearer ci_live_test");
+    // A document routes to the provider that parses documents.
+    assert.equal(calls.url, "https://api.openai.com/v1/chat/completions");
+    assert.equal(calls.headers.Authorization, "Bearer sk-test");
 
     const parts = lastUserParts(calls.body);
     const filePart = parts.find((part) => part.type === "file");
@@ -132,7 +135,7 @@ test("multipart generation inlines an image as an image_url part", async () => {
         method: "POST",
         body: form
       }),
-      { CHEAPER_INFERENCE_API_KEY: "ci_live_test" },
+      BOTH_KEYS,
       "request-inline-image"
     );
 
@@ -170,7 +173,7 @@ test("refinement re-attaches a resent file from multipart", async () => {
         method: "POST",
         body: form
       }),
-      { CHEAPER_INFERENCE_API_KEY: "ci_live_test" },
+      BOTH_KEYS,
       "request-refine-file"
     );
     const body = await response.json();
@@ -200,7 +203,7 @@ test("refinement without a source falls back to the deck-only note", async () =>
           sourceId: "file-abc123"
         })
       }),
-      { CHEAPER_INFERENCE_API_KEY: "ci_live_test" },
+      BOTH_KEYS,
       "request-refine-stale-id"
     );
 
@@ -209,12 +212,17 @@ test("refinement without a source falls back to the deck-only note", async () =>
       lastUserParts(calls.body),
       /No source material was supplied/
     );
+    // No file means no reason to leave the cheap provider.
+    assert.equal(
+      calls.url,
+      "https://api.cheaperinference.com/v1/chat/completions"
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("a truncated response is reported as incomplete", async () => {
+function truncatedRefine(promptTokens) {
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async () =>
@@ -222,28 +230,45 @@ test("a truncated response is reported as incomplete", async () => {
       JSON.stringify({
         id: "resp-truncated",
         model: "test-model",
-        choices: [{ finish_reason: "length", message: { content: "" } }]
+        choices: [{ finish_reason: "length", message: { content: "" } }],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 6421 }
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
 
+  const done = refineDeck(
+    new Request("https://api.example/v1/decks/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "Reword card one.",
+        deck: { cards: [{ id: "card-1", type: "tap_reveal" }] }
+      })
+    }),
+    BOTH_KEYS,
+    "request-truncated"
+  );
+
+  return { done, restore: () => (globalThis.fetch = originalFetch) };
+}
+
+test("a source that fills the context window says so", async () => {
+  // The real failure: 399,047 prompt tokens left no room for a deck.
+  const { done, restore } = truncatedRefine(399_047);
+
   try {
-    await assert.rejects(
-      refineDeck(
-        new Request("https://api.example/v1/decks/refine", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            instruction: "Reword card one.",
-            deck: { cards: [{ id: "card-1", type: "tap_reveal" }] }
-          })
-        }),
-        { CHEAPER_INFERENCE_API_KEY: "ci_live_test" },
-        "request-truncated"
-      ),
-      /response was incomplete/
-    );
+    await assert.rejects(done, /filled the model's context window/);
   } finally {
-    globalThis.fetch = originalFetch;
+    restore();
+  }
+});
+
+test("a merely long deck is reported as a card-count problem", async () => {
+  const { done, restore } = truncatedRefine(5_000);
+
+  try {
+    await assert.rejects(done, /Ask for fewer cards/);
+  } finally {
+    restore();
   }
 });

@@ -19,6 +19,54 @@ Pasted notes can still use the existing JSON text request.
 ### GET /
 Health check.
 
+### POST /v1/sources/extract — transcribe a document once
+
+The cheap path. Converts a document into complete Markdown **one time**, so
+every deck, refinement, and follow-up afterwards runs on text instead of
+re-parsing the file.
+
+```bash
+curl -X POST https://api.learnalertapp.com/v1/sources/extract \
+  -F 'file=@SpanishModule.pdf' \
+  -F 'sourceName=Spanish Module 3'
+```
+
+```json
+{
+  "success": true,
+  "contentHash": "9f2b...c41e",
+  "source": { "name": "Spanish Module 3", "kind": "file",
+              "mimeType": "application/pdf", "byteSize": 254119 },
+  "extraction": {
+    "markdown": "## Page 1\n\nla mesa — the table\n...",
+    "pageCount": 42,
+    "detectedLanguage": "es",
+    "coverageNotes": [],
+    "characterCount": 112480,
+    "estimatedTokens": 28120
+  },
+  "meta": { "provider": "openai", "model": "gpt-5.6-luna", "usage": {} }
+}
+```
+
+Store `extraction.markdown` in the app and send it as `text` to
+`/v1/decks/generate` or `sourceText` to `/v1/decks/refine` from then on. The
+file never travels again.
+
+`contentHash` is the SHA-256 of the file bytes. Keep it alongside the
+transcription: if the user picks the same document again, the hash matches and
+you skip extraction entirely. This is what stops the duplicate-upload problem —
+the hash is over content, so a renamed file still matches.
+
+`coverageNotes` lists anything the model could not transcribe faithfully, such
+as an illegible scan. An empty array means it believes the transcription is
+complete. It is not a summary field.
+
+Extraction accepts files up to **8 MB**, far above the inline limit, because it
+routes to a provider that parses documents natively rather than tokenizing
+base64. Output is capped at 64,000 tokens; a document longer than that returns a
+truncation error and must be split.
+
 ### POST /v1/decks/generate — original file upload
 
 Use `multipart/form-data`.
@@ -101,7 +149,26 @@ Supported upload extensions in this project:
 - JPG / JPEG
 - WEBP
 
-Maximum upload size enforced by LearnAlert: **20 MB**.
+### Upload size is a token budget, not a file-size preference
+
+An inlined file is billed and counted as **tokens**, not bytes. Base64 expands
+bytes by 4/3 and tokenizes at roughly 4 characters per token, so one token costs
+about three source bytes:
+
+| Upload | Approx. tokens | Fits a 400k window? |
+| --- | --- | --- |
+| 100 KB | ~34,000 | yes |
+| 500 KB | ~170,000 | yes |
+| 1 MB | ~350,000 | barely |
+| 20 MB | ~7,000,000 | no, 17x over |
+
+The ceiling is therefore derived in `src/config.js` from the context window
+rather than picked by hand: **`MAX_SOURCE_TOKENS * BYTES_PER_TOKEN`, about
+0.9 MB**. Oversized uploads are rejected with a 400 before anything is encoded
+or sent, because discovering the limit upstream costs real money.
+
+If you need to handle large documents, inlining is the wrong tool: extract text
+in the app, or render pages to images and send those instead.
 
 ### POST /v1/decks/generate — pasted text
 
@@ -236,6 +303,34 @@ For pasted text, refinement can continue using `sourceText` instead. A request
 that carries neither a file nor `sourceText` is still refined, but only against
 the current deck: the model is told not to introduce new factual claims.
 
+### GET /errors
+
+A debugging view of API errors from the last **5 minutes**, newest first.
+HTML by default; add `?format=json` for machine-readable output.
+
+```bash
+curl 'https://api.learnalertapp.com/errors?format=json'
+```
+
+Each entry carries the error code, HTTP status, message, request id, route, and
+the internal `details` that are deliberately withheld from the app's response —
+upstream payloads, token counts, and the like.
+
+**This is best-effort.** The log lives in the memory of one Cloudflare isolate.
+Cloudflare runs many short-lived isolates per region, so the page shows what the
+isolate answering *that* request happened to see. An error missing here may
+still have happened. For the authoritative stream:
+
+```bash
+npx wrangler tail
+```
+
+Two settings control access, because `details` can quote upstream payloads:
+
+- `ERROR_LOG_ENABLED` — must be `"true"`, or the route 404s.
+- `DEBUG_TOKEN` — optional secret. When set, callers must pass it as
+  `?token=...` or an `X-Debug-Token` header. Set one if the Worker is public.
+
 ### POST /generate-quiz
 
 Legacy compatibility endpoint for the earlier LearnAlert integration. It still accepts extracted text.
@@ -244,6 +339,23 @@ Legacy compatibility endpoint for the earlier LearnAlert integration. It still a
 
 Every call is a plain `POST /v1/chat/completions`, which both providers accept
 with an identical body. Switching is therefore only a change of host and key.
+
+### Routing by content type
+
+Text and documents have different economics, so they route separately:
+
+| Request | Setting | Default | Why |
+| --- | --- | --- | --- |
+| Text (JSON body) | `AI_PROVIDER` | `cheaper_inference` | identical work, ~60% cheaper |
+| Carries a file | `DOCUMENT_PROVIDER` | `openai` | must parse the document, not tokenize base64 |
+
+These are independent. `DOCUMENT_PROVIDER` applies even when `AI_PROVIDER` is
+set, so the usual deployment uses the gateway for text and OpenAI for files. An
+`X-AI-Provider` header, when overrides are enabled, beats both.
+
+The reason is cost. A base64 file that nobody decodes is billed as text: the
+same document costs ~400k tokens as base64 versus ~110k parsed natively. A 60%
+discount does not cover a 4x token penalty.
 
 | Provider | `AI_PROVIDER` | Base URL | Secret |
 | --- | --- | --- | --- |
@@ -303,14 +415,58 @@ curl -X POST https://api.learnalertapp.com/v1/decks/generate \
 
 Never put either secret in GitHub or the iOS app.
 
+## Where errors come from
+
+Three different layers can fail, and they surface differently:
+
+| Origin | What it looks like | Where to see it |
+| --- | --- | --- |
+| Request validation (this Worker) | `VALIDATION_ERROR`, HTTP 400 | response body, `/errors`, `wrangler tail` |
+| Upstream provider | `AI_REQUEST_FAILED` with the provider's message | same, plus the provider dashboard |
+| Our handling of a good response | `AI_REQUEST_FAILED`, HTTP 502 | same, but **not** the provider dashboard |
+
+That third row is the confusing one. If the provider shows a request as
+`settled` but your app shows an error, the upstream call succeeded and was
+billed — the failure happened here, after the response came back. Truncated
+decks (`finish_reason: "length"`) are the usual cause.
+
+The app never sees `details`; it gets `{ success, requestId, error: { code,
+message } }`. Match the `requestId` against `/errors` or `wrangler tail` to see
+the rest.
+
 ## Important behavior
 
 The gateway is stateless and zero-retention: there is no `/v1/files` endpoint,
 so source bytes are sent inline on every request and nothing persists upstream.
 
-That means refinement days later needs the file resent from the device. If you
-want the Worker to hold it instead, add durable private storage (for example R2)
-keyed by a source id, and inline the bytes from there.
+That means refinement days later needs the file resent from the device — unless
+you use `/v1/sources/extract` first, which is the recommended flow. Once you
+hold the Markdown, nothing needs the original file again, and the app can keep
+it forever for free.
+
+### Recommended flow
+
+```
+1. POST /v1/sources/extract   (once per document, OpenAI, ~110k tokens)
+        -> store markdown + contentHash in the app
+
+2. POST /v1/decks/generate    { "text": "<markdown>" }
+        -> gateway, ~28k tokens, 60% off
+
+3. POST /v1/decks/refine      { "deck": {...}, "instruction": "..." }
+        -> gateway, ~18k tokens per turn
+```
+
+Costs for one document, one deck, five refinements:
+
+| | tokens | cost |
+| --- | --- | --- |
+| Sending the PDF every time | 449,000 | $0.095 |
+| Extract once, then text | 228,000 | $0.083 |
+| **Every later deck from that document** | **118,000** | **$0.025** |
+
+The first deck saves little. The saving is that extraction never repeats: a
+second deck from the same source costs about a quarter of what it used to.
 
 ## iOS integration change
 

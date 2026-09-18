@@ -5,10 +5,51 @@ import {
   isProviderConfigured,
   providerNames
 } from "./lib/ai.js";
-import { DEFAULT_PROVIDER } from "./config.js";
+import { DEFAULT_PROVIDER, DEFAULT_DOCUMENT_PROVIDER } from "./config.js";
+import { recordError } from "./lib/errorLog.js";
+import { errorsPage, isErrorsPageAllowed } from "./routes/errorsPage.js";
+import { extractSource } from "./routes/extractSource.js";
 import { generateDeck } from "./routes/generateDeck.js";
 import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
+
+function classify(error) {
+  if (error instanceof ValidationError) {
+    return {
+      code: "VALIDATION_ERROR",
+      message: error.message,
+      status: 400,
+      details: error.details || null
+    };
+  }
+
+  if (error instanceof AIRequestError) {
+    return {
+      code: "AI_REQUEST_FAILED",
+      message: error.message,
+      status:
+        error.status >= 400 && error.status < 600 ? error.status : 502,
+      details: error.details || null
+    };
+  }
+
+  if (error instanceof SyntaxError) {
+    return {
+      code: "INVALID_JSON",
+      message: "Request body must be valid JSON.",
+      status: 400,
+      details: null
+    };
+  }
+
+  return {
+    code: "INTERNAL_ERROR",
+    message: "Something went wrong while processing the request.",
+    status: 500,
+    // The app gets a generic message; the log keeps what actually happened.
+    details: { name: error?.name, message: error?.message }
+  };
+}
 
 export default {
   async fetch(request, env) {
@@ -19,6 +60,14 @@ export default {
       return optionsResponse();
     }
 
+    if (request.method === "GET" && url.pathname === "/errors") {
+      if (!isErrorsPageAllowed(request, env)) {
+        return apiError("NOT_FOUND", "Endpoint not found.", 404, requestId);
+      }
+
+      return errorsPage(request);
+    }
+
     if (request.method === "GET" && url.pathname === "/") {
       return json({
         ok: true,
@@ -26,6 +75,7 @@ export default {
         version: "1.1.0",
         ai: {
           active: env.AI_PROVIDER || DEFAULT_PROVIDER,
+          documents: env.DOCUMENT_PROVIDER || DEFAULT_DOCUMENT_PROVIDER,
           overrideAllowed: env.ALLOW_PROVIDER_OVERRIDE === "true",
           // Which providers actually have a key, so a standby that was never
           // given one does not look ready.
@@ -34,6 +84,7 @@ export default {
           )
         },
         endpoints: [
+          "POST /v1/sources/extract",
           "POST /v1/decks/generate",
           "POST /v1/decks/refine",
           "POST /generate-quiz"
@@ -42,6 +93,13 @@ export default {
     }
 
     try {
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/sources/extract"
+      ) {
+        return await extractSource(request, env, requestId);
+      }
+
       if (
         request.method === "POST" &&
         url.pathname === "/v1/decks/generate"
@@ -73,47 +131,24 @@ export default {
     } catch (error) {
       console.error(`[${requestId}]`, error);
 
-      if (error instanceof ValidationError) {
-        return apiError(
-          "VALIDATION_ERROR",
-          error.message,
-          400,
-          requestId
-        );
+      const { code, message, status, details } = classify(error);
+
+      // Details stay out of the app's response, but the debug log keeps them.
+      if (details) {
+        console.error(`[${requestId}] details:`, details);
       }
 
-      if (error instanceof AIRequestError) {
-        // Do not leak full upstream details to the app.
-        console.error(
-          `[${requestId}] upstream details:`,
-          error.details
-        );
+      recordError({
+        requestId,
+        code,
+        message,
+        status,
+        details,
+        method: request.method,
+        path: url.pathname
+      });
 
-        return apiError(
-          "AI_REQUEST_FAILED",
-          error.message,
-          error.status >= 400 && error.status < 600
-            ? error.status
-            : 502,
-          requestId
-        );
-      }
-
-      if (error instanceof SyntaxError) {
-        return apiError(
-          "INVALID_JSON",
-          "Request body must be valid JSON.",
-          400,
-          requestId
-        );
-      }
-
-      return apiError(
-        "INTERNAL_ERROR",
-        "Something went wrong while processing the request.",
-        500,
-        requestId
-      );
+      return apiError(code, message, status, requestId);
     }
   }
 };

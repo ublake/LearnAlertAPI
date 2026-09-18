@@ -118,7 +118,7 @@ const COVERAGE_SCHEMA = {
     cardsCreated: {
       type: "integer",
       minimum: 1,
-      maximum: 50
+      maximum: 200
     },
     omittedImportantTopics: {
       type: "array",
@@ -161,7 +161,7 @@ const DECK_OBJECT_SCHEMA = {
       type: "array",
       items: CARD_SCHEMA,
       minItems: 1,
-      maxItems: 50
+      maxItems: 200
     }
   },
   required: [
@@ -214,6 +214,37 @@ export const GENERATION_RESULT_SCHEMA = {
     "action",
     "assistantMessage",
     "deck"
+  ],
+  additionalProperties: false
+};
+
+export const EXTRACTION_SCHEMA = {
+  type: "object",
+  properties: {
+    markdown: {
+      type: "string"
+    },
+    pageCount: {
+      type: "integer",
+      minimum: 0,
+      maximum: 10_000
+    },
+    detectedLanguage: {
+      type: "string"
+    },
+    coverageNotes: {
+      type: "array",
+      items: {
+        type: "string"
+      },
+      maxItems: 20
+    }
+  },
+  required: [
+    "markdown",
+    "pageCount",
+    "detectedLanguage",
+    "coverageNotes"
   ],
   additionalProperties: false
 };

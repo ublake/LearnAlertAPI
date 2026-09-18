@@ -1,4 +1,9 @@
-import { PROVIDERS, DEFAULT_PROVIDER } from "../config.js";
+import {
+  PROVIDERS,
+  DEFAULT_PROVIDER,
+  DEFAULT_DOCUMENT_PROVIDER,
+  CONTEXT_WINDOW_TOKENS
+} from "../config.js";
 
 export class AIRequestError extends Error {
   constructor(message, status = 500, details = null) {
@@ -51,6 +56,27 @@ export function resolveProvider(env, requested = "") {
     model: env.AI_MODEL || provider.model,
     baseUrl: (env.AI_BASE_URL || provider.baseUrl).replace(/\/+$/, "")
   };
+}
+
+/**
+ * Content-type routing. A request carrying a document needs a provider that
+ * parses it; a text request just needs the cheapest tokens. Both still respect
+ * an explicit AI_PROVIDER, so the switcher keeps working as an override.
+ */
+export function resolveProviderForContent(env, { hasFile = false, requested = "" } = {}) {
+  if (!hasFile) {
+    return resolveProvider(env, requested);
+  }
+
+  // Documents follow DOCUMENT_PROVIDER, independently of the text provider.
+  // An explicit request override still wins, so smoke tests can force either.
+  return resolveProvider(
+    {
+      ...env,
+      AI_PROVIDER: env.DOCUMENT_PROVIDER || DEFAULT_DOCUMENT_PROVIDER
+    },
+    requested
+  );
 }
 
 function toBase64(buffer) {
@@ -173,10 +199,24 @@ export async function callStructuredOutput({
   }
 
   if (choice?.finish_reason === "length") {
+    const promptTokens = data?.usage?.prompt_tokens ?? null;
+    const crowdedOut =
+      promptTokens !== null &&
+      promptTokens > CONTEXT_WINDOW_TOKENS - maxOutputTokens;
+
     throw new AIRequestError(
-      "The AI response was incomplete. Try a smaller document or fewer cards.",
+      crowdedOut
+        ? "The source filled the model's context window, leaving no room for a deck. " +
+          "Send a shorter document or split it into sections."
+        : "The AI ran out of room before finishing the deck. Ask for fewer cards.",
       502,
-      { finishReason: choice.finish_reason }
+      {
+        finishReason: choice.finish_reason,
+        promptTokens,
+        completionTokens: data?.usage?.completion_tokens ?? null,
+        outputBudget: maxOutputTokens,
+        contextWindow: CONTEXT_WINDOW_TOKENS
+      }
     );
   }
 

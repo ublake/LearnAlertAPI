@@ -4,7 +4,9 @@ import {
   MODES,
   DIFFICULTIES,
   LANGUAGE_DIRECTIONS,
-  ALLOWED_UPLOAD_EXTENSIONS
+  ALLOWED_UPLOAD_EXTENSIONS,
+  MAX_EXTRACT_BYTES,
+  estimateFileTokens
 } from "../config.js";
 
 export function clampInteger(value, fallback, min, max) {
@@ -146,13 +148,21 @@ export function validateGenerateRequest(body) {
   };
 }
 
-function validateUploadedFile(file) {
+function validateUploadedFile(file, maxBytes = LIMITS.MAX_UPLOAD_BYTES) {
   if (file.size <= 0) {
     throw new ValidationError("The uploaded file is empty.");
   }
 
-  if (file.size > LIMITS.MAX_UPLOAD_BYTES) {
-    throw new ValidationError("The uploaded file is too large. Maximum size is 20 MB.");
+  // Reject before encoding: an oversized file costs real money to discover
+  // upstream, and the request cannot fit the context window anyway.
+  if (file.size > maxBytes) {
+    const mb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+
+    throw new ValidationError(
+      `This file is ${mb(file.size)}, over this endpoint's ${mb(maxBytes)} limit. ` +
+        "Split it into sections, or send a shorter excerpt.",
+      { fileBytes: file.size, estimatedTokens: estimateFileTokens(file.size) }
+    );
   }
 
   const filename = file.name || "upload";
@@ -307,4 +317,33 @@ export function validateRefineForm(formData) {
   };
 }
 
-export class ValidationError extends Error {}
+export class ValidationError extends Error {
+  constructor(message, details = null) {
+    super(message);
+    this.details = details;
+  }
+}
+
+/**
+ * Extraction routes to a provider that parses documents natively, so it is
+ * bounded by file size rather than by the inline token budget.
+ */
+export function validateExtractForm(formData) {
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    throw new ValidationError("file is required for extraction.");
+  }
+
+  const { filename, mimeType, sourceKind } = validateUploadedFile(
+    file,
+    MAX_EXTRACT_BYTES
+  );
+
+  return {
+    file,
+    mimeType,
+    sourceKind,
+    sourceName: optionalString(formData.get("sourceName"), 200) || filename
+  };
+}

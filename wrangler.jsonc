@@ -9,6 +9,10 @@
     // The switcher: "cheaper_inference" or "openai".
     "AI_PROVIDER": "cheaper_inference",
     // Set to "true" to let a request pick the provider via X-AI-Provider.
-    "ALLOW_PROVIDER_OVERRIDE": "false"
+    "ALLOW_PROVIDER_OVERRIDE": "false",
+    // Which provider parses uploaded documents. AI_PROVIDER overrides this.
+    "DOCUMENT_PROVIDER": "openai",
+    // Serves GET /errors. Set a DEBUG_TOKEN secret to require a token.
+    "ERROR_LOG_ENABLED": "true"
   }
 }

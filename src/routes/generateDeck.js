@@ -1,10 +1,10 @@
 import { GENERATION_RESULT_SCHEMA } from "../schemas.js";
 import { GENERATION_INSTRUCTIONS } from "../prompts.js";
-import { CARD_TYPES } from "../config.js";
+import { CARD_TYPES, outputBudget } from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
-  resolveProvider,
+  resolveProviderForContent,
   sourceContentItem,
   textContentItem
 } from "../lib/ai.js";
@@ -32,16 +32,19 @@ function buildPreferences(config) {
 
 export async function generateDeck(request, env, requestId) {
   const contentType = request.headers.get("content-type") || "";
-  const provider = resolveProvider(
-    env,
-    request.headers.get("x-ai-provider") || ""
-  );
+  const isUpload = contentType.includes("multipart/form-data");
+
+  // A request carrying a document needs a provider that parses documents.
+  const provider = resolveProviderForContent(env, {
+    hasFile: isUpload,
+    requested: request.headers.get("x-ai-provider") || ""
+  });
 
   let config;
   let source = null;
   let input;
 
-  if (contentType.includes("multipart/form-data")) {
+  if (isUpload) {
     const formData = await request.formData();
     config = validateGenerateForm(formData);
 
@@ -102,7 +105,7 @@ ${config.text}
     input,
     schema: GENERATION_RESULT_SCHEMA,
     schemaName: "learnalert_generation_result",
-    maxOutputTokens: 24_000,
+    maxOutputTokens: outputBudget(config.maxCards),
     reasoningEffort: "low"
   });
 

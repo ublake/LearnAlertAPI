@@ -1,9 +1,10 @@
 import { DECK_SCHEMA } from "../schemas.js";
 import { REFINE_INSTRUCTIONS } from "../prompts.js";
+import { outputBudget } from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
-  resolveProvider,
+  resolveProviderForContent,
   sourceContentItem,
   textContentItem
 } from "../lib/ai.js";
@@ -16,14 +17,16 @@ import { json } from "../lib/http.js";
 
 export async function refineDeck(request, env, requestId) {
   const contentType = request.headers.get("content-type") || "";
-  const provider = resolveProvider(
-    env,
-    request.headers.get("x-ai-provider") || ""
-  );
 
   const config = contentType.includes("multipart/form-data")
     ? validateRefineForm(await request.formData())
     : validateRefineRequest(await request.json());
+
+  // Only a request that actually carries a file needs the document provider.
+  const provider = resolveProviderForContent(env, {
+    hasFile: Boolean(config.file),
+    requested: request.headers.get("x-ai-provider") || ""
+  });
 
   const sourceContext = config.file
     ? "<source_note>The original source is attached to this request. Use it as the factual authority and inspect its original structure/visuals when relevant.</source_note>"
@@ -91,7 +94,7 @@ ${sourceContext}
     input,
     schema: DECK_SCHEMA,
     schemaName: "learnalert_refined_deck",
-    maxOutputTokens: 24_000,
+    maxOutputTokens: outputBudget(config.maxCards),
     reasoningEffort: "low"
   });
 
