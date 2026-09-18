@@ -191,3 +191,38 @@ test("unusable model output is a 502, not an INTERNAL_ERROR", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("an over-length field reports what it actually received", async () => {
+  const transcript = "A".repeat(8_000);
+
+  const response = await worker.fetch(
+    new Request("https://api.example/v1/decks/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deck: { cards: [] },
+        instruction: transcript
+      })
+    }),
+    ENABLED
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 400);
+  // The app gets the numbers, so "too long" is actionable on its own.
+  assert.match(body.error.message, /8,000 characters/);
+  assert.match(body.error.message, /maximum is 2,000/);
+
+  const log = await (
+    await worker.fetch(
+      new Request("https://api.example/errors?format=json"),
+      ENABLED
+    )
+  ).json();
+
+  const entry = log.errors[0];
+
+  assert.equal(entry.details.field, "instruction");
+  assert.equal(entry.details.received, 8_000);
+  assert.equal(entry.details.startsWith.length, 120);
+});

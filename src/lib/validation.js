@@ -29,7 +29,17 @@ export function requiredString(value, fieldName, maxLength = Infinity) {
 
   if (trimmed.length > maxLength) {
     throw new ValidationError(
-      `${fieldName} is too long. Maximum length is ${maxLength.toLocaleString()} characters.`
+      `${fieldName} is too long: ${trimmed.length.toLocaleString()} characters, ` +
+        `maximum is ${maxLength.toLocaleString()}.`,
+      {
+        field: fieldName,
+        received: trimmed.length,
+        maximum: maxLength,
+        // Enough to tell a user's message from a pasted transcript, without
+        // putting the whole payload in the debug log.
+        startsWith: trimmed.slice(0, 120),
+        endsWith: trimmed.slice(-120)
+      }
     );
   }
 
