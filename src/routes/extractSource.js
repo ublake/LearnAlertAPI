@@ -35,7 +35,7 @@ export async function extractSource(request, env, requestId) {
   const buffer = await config.file.arrayBuffer();
   const hash = await contentHash(buffer);
 
-  const encoded = await encodeSourceFile(config.file, config.mimeType);
+  const encoded = await encodeSourceFile(config.file, config.mimeType, buffer);
 
   const ai = await callStructuredOutput({
     env,

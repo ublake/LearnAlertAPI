@@ -81,7 +81,9 @@ export function resolveProviderForContent(env, { hasFile = false, requested = ""
 
 function toBase64(buffer) {
   const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
+  // Small chunks on purpose: spreading 32k arguments into fromCharCode can
+  // exhaust a Worker's stack, which surfaces as an opaque INTERNAL_ERROR.
+  const chunkSize = 0x1000;
   let binary = "";
 
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -95,9 +97,11 @@ function toBase64(buffer) {
  * The gateway is stateless: there is no /v1/files to upload to, so every
  * request carries the source bytes inline as a data URL.
  */
-export async function encodeSourceFile(file, mimeType) {
+export async function encodeSourceFile(file, mimeType, buffer = null) {
   const type = mimeType || file.type || "application/octet-stream";
-  const base64 = toBase64(await file.arrayBuffer());
+  // Callers that already read the file pass the buffer in; reading it twice
+  // doubles peak memory, and a Worker only has 128 MB.
+  const base64 = toBase64(buffer || (await file.arrayBuffer()));
 
   return {
     dataUrl: `data:${type};base64,${base64}`,
