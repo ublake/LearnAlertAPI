@@ -1,7 +1,7 @@
 export const MODEL = "gpt-5.6-luna";
 
 export const LIMITS = {
-  MAX_CARDS: 50,
+  MAX_CARDS: 200,
   DEFAULT_MAX_CARDS: 50,
   MAX_SOURCE_CHARS: 300_000,
   MAX_USER_INSTRUCTION_CHARS: 2_000,
