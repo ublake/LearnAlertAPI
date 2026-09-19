@@ -1,6 +1,6 @@
 import { DECK_SCHEMA } from "../schemas.js";
 import { REFINE_INSTRUCTIONS } from "../prompts.js";
-import { outputBudget, uploadCeilingBytes, PROVIDERS, DEFAULT_DOCUMENT_PROVIDER } from "../config.js";
+import { outputBudget, uploadCeilingBytes, PROVIDERS, DEFAULT_DOCUMENT_PROVIDER, reasoningEffort } from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
@@ -104,7 +104,7 @@ ${config.instruction}
     schema: DECK_SCHEMA,
     schemaName: "learnalert_refined_deck",
     maxOutputTokens: outputBudget(config.maxCards),
-    reasoningEffort: "low"
+    reasoningEffort: reasoningEffort("refine", env)
   });
 
   const validIds = new Set(

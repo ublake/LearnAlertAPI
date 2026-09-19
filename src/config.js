@@ -104,6 +104,32 @@ export const OUTLINE = {
   OUTPUT_TOKENS: 16_000
 };
 
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high"];
+
+/**
+ * Per-task reasoning effort. Defaults stay at the known-working "low" — this
+ * exists so the tradeoff can be measured per task without a redeploy, since
+ * generation needs judgment (distractors, coverage) while transcription does
+ * not.
+ *
+ * Override with REASONING_GENERATION / _REFINE / _EXTRACTION / _OUTLINE.
+ */
+const REASONING_DEFAULTS = {
+  generation: "low",
+  refine: "low",
+  extraction: "low",
+  outline: "low"
+};
+
+export function reasoningEffort(task, env = {}) {
+  const requested = env[`REASONING_${task.toUpperCase()}`];
+
+  // An unknown value would be a 400 from upstream, so fall back instead.
+  return REASONING_EFFORTS.includes(requested)
+    ? requested
+    : REASONING_DEFAULTS[task] || "low";
+}
+
 export function estimateFileTokens(byteSize) {
   return Math.ceil(byteSize / BYTES_PER_TOKEN);
 }

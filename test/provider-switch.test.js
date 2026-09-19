@@ -237,3 +237,42 @@ test("the health check reports the document provider separately", async () => {
   assert.equal(body.ai.active, "cheaper_inference");
   assert.equal(body.ai.documents, "openai");
 });
+
+test("reasoning effort is per-task and overridable without a deploy", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = stubFetch();
+
+  try {
+    await generateDeck(
+      generateRequest(),
+      { CHEAPER_INFERENCE_API_KEY: "ci_live" },
+      "r-default"
+    );
+    assert.equal(calls.body.reasoning_effort, "low");
+
+    await generateDeck(
+      generateRequest(),
+      { CHEAPER_INFERENCE_API_KEY: "ci_live", REASONING_GENERATION: "minimal" },
+      "r-minimal"
+    );
+    assert.equal(calls.body.reasoning_effort, "minimal");
+
+    // A typo must not become a 400 from upstream.
+    await generateDeck(
+      generateRequest(),
+      { CHEAPER_INFERENCE_API_KEY: "ci_live", REASONING_GENERATION: "ludicrous" },
+      "r-bad"
+    );
+    assert.equal(calls.body.reasoning_effort, "low");
+
+    // Tasks are independent: extraction's setting must not leak into this one.
+    await generateDeck(
+      generateRequest(),
+      { CHEAPER_INFERENCE_API_KEY: "ci_live", REASONING_EXTRACTION: "minimal" },
+      "r-other-task"
+    );
+    assert.equal(calls.body.reasoning_effort, "low");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

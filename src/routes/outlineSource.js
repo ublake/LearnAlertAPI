@@ -1,6 +1,6 @@
 import { OUTLINE_SCHEMA } from "../schemas.js";
 import { OUTLINE_INSTRUCTIONS } from "../prompts.js";
-import { OUTLINE } from "../config.js";
+import { OUTLINE, reasoningEffort } from "../config.js";
 import {
   callStructuredOutput,
   resolveProviderForContent
@@ -78,7 +78,7 @@ export async function outlineSource(request, env, requestId) {
     schema: OUTLINE_SCHEMA,
     schemaName: "learnalert_source_outline",
     maxOutputTokens: OUTLINE.OUTPUT_TOKENS,
-    reasoningEffort: "low"
+    reasoningEffort: reasoningEffort("outline", env)
   });
 
   const sections = normalizeSections(ai.value.sections, lastPage);

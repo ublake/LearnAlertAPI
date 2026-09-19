@@ -1,6 +1,6 @@
 import { EXTRACTION_SCHEMA } from "../schemas.js";
 import { EXTRACTION_INSTRUCTIONS } from "../prompts.js";
-import { EXTRACTION_OUTPUT_TOKENS } from "../config.js";
+import { EXTRACTION_OUTPUT_TOKENS, reasoningEffort } from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
@@ -59,7 +59,7 @@ export async function extractSource(request, env, requestId) {
     schema: EXTRACTION_SCHEMA,
     schemaName: "learnalert_source_extraction",
     maxOutputTokens: EXTRACTION_OUTPUT_TOKENS,
-    reasoningEffort: "low"
+    reasoningEffort: reasoningEffort("extraction", env)
   });
 
   const markdown = typeof ai.value.markdown === "string" ? ai.value.markdown : "";

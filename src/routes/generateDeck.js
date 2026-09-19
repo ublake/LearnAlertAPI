@@ -3,7 +3,8 @@ import { GENERATION_INSTRUCTIONS } from "../prompts.js";
 import {
   CARD_TYPES,
   outputBudget,
-  uploadCeilingBytes
+  uploadCeilingBytes,
+  reasoningEffort
 } from "../config.js";
 import {
   callStructuredOutput,
@@ -110,7 +111,7 @@ ${config.text}
     schema: GENERATION_RESULT_SCHEMA,
     schemaName: "learnalert_generation_result",
     maxOutputTokens: outputBudget(config.maxCards),
-    reasoningEffort: "low"
+    reasoningEffort: reasoningEffort("generation", env)
   });
 
   const normalized = normalizeGenerationResult(
