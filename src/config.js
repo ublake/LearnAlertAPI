@@ -40,13 +40,28 @@ export const DEFAULT_DOCUMENT_PROVIDER = "openai";
  * one token costs about three source bytes. A 20 MB upload would be ~7M
  * tokens: 17x over the window. These numbers keep a request inside it.
  */
-export const CONTEXT_WINDOW_TOKENS = 400_000;
+// Documented capacity for gpt-5.6-luna: ~1.05M total, 922k in, 128k out.
+export const CONTEXT_WINDOW_TOKENS = 1_050_000;
+export const MAX_INPUT_TOKENS = 922_000;
+export const MAX_OUTPUT_TOKENS = 128_000;
+
 export const BYTES_PER_TOKEN = 3;
+
+/**
+ * Capacity is not the binding constraint — cost is. Long-context requests are
+ * billed at a premium above a threshold, so the default budget targets that
+ * cliff rather than the ceiling.
+ *
+ * NOTE: the 272k figure is single-sourced and unverified against OpenAI's
+ * pricing page. It is used as a soft budget, never as a hard capacity claim.
+ */
+export const STANDARD_CONTEXT_INPUT_TOKENS = 272_000;
 
 // Room reserved for the system prompt, schema, deck JSON, and the reply.
 export const RESERVED_TOKENS = 80_000;
 
-export const MAX_SOURCE_TOKENS = CONTEXT_WINDOW_TOKENS - RESERVED_TOKENS;
+export const MAX_SOURCE_TOKENS =
+  STANDARD_CONTEXT_INPUT_TOKENS - RESERVED_TOKENS;
 
 export const LIMITS = {
   MAX_CARDS: 200,
@@ -65,7 +80,7 @@ export const LIMITS = {
 export const MAX_EXTRACT_BYTES = 8 * 1024 * 1024;
 
 // Transcription is long by design; give it most of the output window.
-export const EXTRACTION_OUTPUT_TOKENS = 64_000;
+export const EXTRACTION_OUTPUT_TOKENS = 96_000;
 
 /**
  * A parser that reads the document costs tokens per page, so bytes stop being
@@ -89,7 +104,7 @@ export function estimateFileTokens(byteSize) {
  */
 export function outputBudget(maxCards) {
   const budget = 4_000 + maxCards * 300;
-  return Math.min(Math.max(budget, 8_000), 64_000);
+  return Math.min(Math.max(budget, 8_000), MAX_OUTPUT_TOKENS);
 }
 
 export const CARD_TYPES = [

@@ -252,12 +252,24 @@ function truncatedRefine(promptTokens) {
   return { done, restore: () => (globalThis.fetch = originalFetch) };
 }
 
-test("a source that fills the context window says so", async () => {
-  // The real failure: 399,047 prompt tokens left no room for a deck.
-  const { done, restore } = truncatedRefine(399_047);
+test("a source that genuinely fills the context window says so", async () => {
+  // gpt-5.6-luna holds ~1.05M tokens, so it takes this much to crowd out
+  // a reply. 399,047 does NOT, which an earlier version wrongly claimed.
+  const { done, restore } = truncatedRefine(1_040_000);
 
   try {
     await assert.rejects(done, /filled the model's context window/);
+  } finally {
+    restore();
+  }
+});
+
+test("a large but survivable prompt is not blamed on the context window", async () => {
+  const { done, restore } = truncatedRefine(399_047);
+
+  try {
+    // Half a million tokens of headroom: the deck length is the problem.
+    await assert.rejects(done, /Ask for fewer cards/);
   } finally {
     restore();
   }

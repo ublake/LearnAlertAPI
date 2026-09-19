@@ -151,6 +151,11 @@ Supported upload extensions in this project:
 
 ### Upload size is a token budget, not a file-size preference
 
+`gpt-5.6-luna` holds ~1,050,000 tokens (922,000 in, 128,000 out), so raw
+capacity is rarely the constraint. **Cost is.** Long-context requests are billed
+at a premium above a threshold, so the source budget targets that threshold
+(`STANDARD_CONTEXT_INPUT_TOKENS` in `src/config.js`) rather than the ceiling.
+
 An inlined file is billed and counted as **tokens**, not bytes. Base64 expands
 bytes by 4/3 and tokenizes at roughly 4 characters per token, so one token costs
 about three source bytes:
@@ -159,8 +164,8 @@ about three source bytes:
 | --- | --- | --- |
 | 100 KB | ~34,000 | yes |
 | 500 KB | ~170,000 | yes |
-| 1 MB | ~350,000 | barely |
-| 20 MB | ~7,000,000 | no, 17x over |
+| 1 MB | ~350,000 | fits, but past the cheap pricing tier |
+| 20 MB | ~7,000,000 | no, 7x over even the 922k input ceiling |
 
 That table only applies to a provider that does **not** parse documents. One
 that does bills per page instead, so bytes stop being the binding constraint.
@@ -170,13 +175,14 @@ The ceiling is therefore a property of the provider (`parsesDocuments` in
 | Document provider | Upload ceiling | Why |
 | --- | --- | --- |
 | `openai` (default) | **8 MB** | parses the PDF; tokens scale with pages |
-| `cheaper_inference` | **0.92 MB** | assumed to bill base64 as text |
+| `cheaper_inference` | **0.55 MB** | assumed to bill base64 as text |
 
 Oversized uploads are rejected with a 400 before anything is encoded or sent,
 because discovering the limit upstream costs real money.
 
-The 0.92 MB figure is deliberately conservative: it is unconfirmed whether the
-gateway parses `file` parts. If a token comparison shows it does, flip
+The 0.55 MB figure is deliberately conservative twice over: it is unconfirmed
+whether the gateway parses `file` parts, and it targets the standard pricing
+tier rather than the model's true capacity. If a token comparison shows it does, flip
 `parsesDocuments` to `true` for it and the ceiling rises automatically.
 
 ### POST /v1/decks/generate — pasted text

@@ -108,7 +108,7 @@ test("the small ceiling still applies to a provider that cannot parse", async ()
 
     assert.equal(called, false);
     assert.equal(response.status, 400);
-    assert.match(body.error.message, /over the 0\.92 MB limit/);
+    assert.match(body.error.message, /over the 0\.55 MB limit/);
   } finally {
     globalThis.fetch = originalFetch;
   }
