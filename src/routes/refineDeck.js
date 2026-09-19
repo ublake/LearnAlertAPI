@@ -1,6 +1,6 @@
 import { DECK_SCHEMA } from "../schemas.js";
 import { REFINE_INSTRUCTIONS } from "../prompts.js";
-import { outputBudget } from "../config.js";
+import { outputBudget, uploadCeilingBytes, PROVIDERS, DEFAULT_DOCUMENT_PROVIDER } from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
@@ -18,8 +18,14 @@ import { json } from "../lib/http.js";
 export async function refineDeck(request, env, requestId) {
   const contentType = request.headers.get("content-type") || "";
 
+  // The document provider decides the ceiling, and it is known before the
+  // form is parsed because only a multipart request can carry a file.
+  const documentCeiling = uploadCeilingBytes(
+    PROVIDERS[env.DOCUMENT_PROVIDER || DEFAULT_DOCUMENT_PROVIDER]
+  );
+
   const config = contentType.includes("multipart/form-data")
-    ? validateRefineForm(await request.formData())
+    ? validateRefineForm(await request.formData(), documentCeiling)
     : validateRefineRequest(await request.json());
 
   // Only a request that actually carries a file needs the document provider.

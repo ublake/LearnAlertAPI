@@ -54,7 +54,8 @@ export function resolveProvider(env, requested = "") {
     label: provider.label,
     apiKey,
     model: env.AI_MODEL || provider.model,
-    baseUrl: (env.AI_BASE_URL || provider.baseUrl).replace(/\/+$/, "")
+    baseUrl: (env.AI_BASE_URL || provider.baseUrl).replace(/\/+$/, ""),
+    parsesDocuments: Boolean(provider.parsesDocuments)
   };
 }
 

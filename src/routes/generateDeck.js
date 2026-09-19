@@ -1,6 +1,10 @@
 import { GENERATION_RESULT_SCHEMA } from "../schemas.js";
 import { GENERATION_INSTRUCTIONS } from "../prompts.js";
-import { CARD_TYPES, outputBudget } from "../config.js";
+import {
+  CARD_TYPES,
+  outputBudget,
+  uploadCeilingBytes
+} from "../config.js";
 import {
   callStructuredOutput,
   encodeSourceFile,
@@ -46,7 +50,7 @@ export async function generateDeck(request, env, requestId) {
 
   if (isUpload) {
     const formData = await request.formData();
-    config = validateGenerateForm(formData);
+    config = validateGenerateForm(formData, uploadCeilingBytes(provider));
 
     const encoded = await encodeSourceFile(config.file, config.mimeType);
 

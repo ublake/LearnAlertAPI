@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import worker from "../src/index.js";
-import { LIMITS } from "../src/config.js";
+import { MAX_EXTRACT_BYTES } from "../src/config.js";
 
 const ENABLED = {
   ERROR_LOG_ENABLED: "true",
@@ -10,13 +10,11 @@ const ENABLED = {
   OPENAI_API_KEY: "sk-test"
 };
 
-function oversizedUpload() {
+function uploadOf(bytes) {
   const form = new FormData();
   form.append(
     "file",
-    new File([new Uint8Array(LIMITS.MAX_UPLOAD_BYTES + 1)], "huge.pdf", {
-      type: "application/pdf"
-    })
+    new File([new Uint8Array(bytes)], "huge.pdf", { type: "application/pdf" })
   );
 
   return new Request("https://api.example/v1/decks/generate", {
@@ -25,7 +23,11 @@ function oversizedUpload() {
   });
 }
 
-test("an oversized upload is rejected without calling upstream", async () => {
+function oversizedUpload() {
+  return uploadOf(MAX_EXTRACT_BYTES + 1);
+}
+
+test("a file over the parsing provider's ceiling is rejected free", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
 
@@ -40,8 +42,73 @@ test("an oversized upload is rejected without calling upstream", async () => {
 
     assert.equal(called, false);
     assert.equal(response.status, 400);
-    assert.match(body.error.message, /over this endpoint's 0\.92 MB limit/);
-    assert.match(body.error.message, /Split it into sections/);
+    assert.match(body.error.message, /over the 8\.00 MB limit/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a natively parsing provider accepts what the inline path cannot", async () => {
+  const originalFetch = globalThis.fetch;
+  let url = "";
+
+  globalThis.fetch = async (requestUrl) => {
+    url = requestUrl;
+    return new Response(
+      JSON.stringify({
+        id: "r",
+        model: "m",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                action: "chat",
+                assistantMessage: "ok",
+                deck: null
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  try {
+    // 2 MB: far past the 0.92 MB base64 budget, fine for a real parser.
+    const response = await worker.fetch(
+      uploadOf(2 * 1024 * 1024),
+      ENABLED
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(url, "https://api.openai.com/v1/chat/completions");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the small ceiling still applies to a provider that cannot parse", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+
+  globalThis.fetch = async () => {
+    called = true;
+    throw new Error("should not be reached");
+  };
+
+  try {
+    const response = await worker.fetch(uploadOf(2 * 1024 * 1024), {
+      ...ENABLED,
+      // Force documents onto the gateway, where base64 is billed as text.
+      DOCUMENT_PROVIDER: "cheaper_inference"
+    });
+    const body = await response.json();
+
+    assert.equal(called, false);
+    assert.equal(response.status, 400);
+    assert.match(body.error.message, /over the 0\.92 MB limit/);
   } finally {
     globalThis.fetch = originalFetch;
   }

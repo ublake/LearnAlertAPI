@@ -162,13 +162,22 @@ about three source bytes:
 | 1 MB | ~350,000 | barely |
 | 20 MB | ~7,000,000 | no, 17x over |
 
-The ceiling is therefore derived in `src/config.js` from the context window
-rather than picked by hand: **`MAX_SOURCE_TOKENS * BYTES_PER_TOKEN`, about
-0.9 MB**. Oversized uploads are rejected with a 400 before anything is encoded
-or sent, because discovering the limit upstream costs real money.
+That table only applies to a provider that does **not** parse documents. One
+that does bills per page instead, so bytes stop being the binding constraint.
+The ceiling is therefore a property of the provider (`parsesDocuments` in
+`src/config.js`), not a global constant:
 
-If you need to handle large documents, inlining is the wrong tool: extract text
-in the app, or render pages to images and send those instead.
+| Document provider | Upload ceiling | Why |
+| --- | --- | --- |
+| `openai` (default) | **8 MB** | parses the PDF; tokens scale with pages |
+| `cheaper_inference` | **0.92 MB** | assumed to bill base64 as text |
+
+Oversized uploads are rejected with a 400 before anything is encoded or sent,
+because discovering the limit upstream costs real money.
+
+The 0.92 MB figure is deliberately conservative: it is unconfirmed whether the
+gateway parses `file` parts. If a token comparison shows it does, flip
+`parsesDocuments` to `true` for it and the ceiling rises automatically.
 
 ### POST /v1/decks/generate — pasted text
 

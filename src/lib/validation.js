@@ -169,7 +169,7 @@ function validateUploadedFile(file, maxBytes = LIMITS.MAX_UPLOAD_BYTES) {
     const mb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 
     throw new ValidationError(
-      `This file is ${mb(file.size)}, over this endpoint's ${mb(maxBytes)} limit. ` +
+      `This file is ${mb(file.size)}, over the ${mb(maxBytes)} limit. ` +
         "Split it into sections, or send a shorter excerpt.",
       { fileBytes: file.size, estimatedTokens: estimateFileTokens(file.size) }
     );
@@ -195,14 +195,14 @@ function validateUploadedFile(file, maxBytes = LIMITS.MAX_UPLOAD_BYTES) {
   };
 }
 
-export function validateGenerateForm(formData) {
+export function validateGenerateForm(formData, maxBytes) {
   const file = formData.get("file");
 
   if (!(file instanceof File)) {
     throw new ValidationError("file is required for multipart upload.");
   }
 
-  const { filename, mimeType, sourceKind } = validateUploadedFile(file);
+  const { filename, mimeType, sourceKind } = validateUploadedFile(file, maxBytes);
 
   const preferredCardTypes = parseFormStringArray(
     formData.get("preferredCardTypes")
@@ -286,7 +286,7 @@ export function validateRefineRequest(body) {
  * Refining against the original document means re-sending it: the gateway is
  * stateless, so there is no server-side copy to point at.
  */
-export function validateRefineForm(formData) {
+export function validateRefineForm(formData, maxBytes) {
   const rawDeck = formData.get("deck");
 
   if (typeof rawDeck !== "string" || !rawDeck.trim()) {
@@ -316,7 +316,7 @@ export function validateRefineForm(formData) {
     return config;
   }
 
-  const { filename, mimeType, sourceKind } = validateUploadedFile(file);
+  const { filename, mimeType, sourceKind } = validateUploadedFile(file, maxBytes);
 
   return {
     ...config,

@@ -10,13 +10,17 @@ export const PROVIDERS = {
     label: "Cheaper Inference",
     baseUrl: "https://api.cheaperinference.com/v1",
     keyVar: "CHEAPER_INFERENCE_API_KEY",
-    model: MODEL
+    model: MODEL,
+    // Unconfirmed that it parses `file` parts; assume base64 is billed as
+    // text until measured, which makes bytes the binding constraint.
+    parsesDocuments: false
   },
   openai: {
     label: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     keyVar: "OPENAI_API_KEY",
-    model: MODEL
+    model: MODEL,
+    parsesDocuments: true
   }
 };
 
@@ -62,6 +66,18 @@ export const MAX_EXTRACT_BYTES = 8 * 1024 * 1024;
 
 // Transcription is long by design; give it most of the output window.
 export const EXTRACTION_OUTPUT_TOKENS = 64_000;
+
+/**
+ * A parser that reads the document costs tokens per page, so bytes stop being
+ * the binding constraint and a generous byte ceiling is fine. A provider that
+ * tokenizes base64 as prose costs ~1 token per 3 bytes, which the context
+ * window caps hard.
+ */
+export function uploadCeilingBytes(provider) {
+  return provider?.parsesDocuments
+    ? MAX_EXTRACT_BYTES
+    : LIMITS.MAX_UPLOAD_BYTES;
+}
 
 export function estimateFileTokens(byteSize) {
   return Math.ceil(byteSize / BYTES_PER_TOKEN);
