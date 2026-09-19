@@ -139,7 +139,16 @@ export function reasoningEffort(task, env = {}) {
  */
 export function pricing(env = {}) {
   const rate = (name) => {
-    const parsed = Number(env[name]);
+    const raw = env[name];
+
+    // An unset var and a var set to "" mean the same thing: no rate card.
+    // Number("") is 0, not NaN, so without this an empty string would price
+    // every call at $0 and claim the figure was real.
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === "string" && raw.trim() === "") return null;
+
+    const parsed = Number(raw);
+
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   };
 

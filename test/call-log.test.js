@@ -446,6 +446,32 @@ test("relative time and duration read the way a log should", () => {
   assert.equal(formatDuration(null), "—");
 });
 
+test("blank price vars read as unset, not as a rate of zero", () => {
+  // wrangler.jsonc ships these as "", which Number() turns into 0.
+  const blank = pricing({
+    PRICE_INPUT_PER_MTOK: "",
+    PRICE_CACHED_INPUT_PER_MTOK: "  ",
+    PRICE_OUTPUT_PER_MTOK: ""
+  });
+
+  assert.equal(blank.input, null);
+  assert.equal(blank.cachedInput, null);
+  assert.equal(blank.output, null);
+  assert.equal(
+    estimateCostUsd(
+      { prompt_tokens: 1_000_000, cachedTokens: 0, completion_tokens: 1000 },
+      blank
+    ),
+    null
+  );
+
+  // A deliberate zero is still a real rate.
+  assert.equal(
+    pricing({ PRICE_INPUT_PER_MTOK: "0", PRICE_OUTPUT_PER_MTOK: "0" }).input,
+    0
+  );
+});
+
 test("cached tokens are billed at the cached rate, not twice", () => {
   const prices = pricing({
     PRICE_INPUT_PER_MTOK: "10",
