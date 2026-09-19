@@ -35,9 +35,6 @@ function cardSchema(type) {
       hint: {
         type: "string"
       },
-      explanation: {
-        type: "string"
-      },
       options: {
         type: "array",
         items: {
@@ -57,10 +54,6 @@ function cardSchema(type) {
         minItems: matching ? 2 : 0,
         maxItems: matching ? 4 : 0
       },
-      difficulty: {
-        type: "string",
-        enum: ["easy", "medium", "hard"]
-      },
       tags: {
         type: "array",
         items: {
@@ -70,9 +63,6 @@ function cardSchema(type) {
       },
       sourceLocator: {
         type: "string"
-      },
-      sourceExcerpt: {
-        type: "string"
       }
     },
     required: [
@@ -81,14 +71,11 @@ function cardSchema(type) {
       "prompt",
       "answer",
       "hint",
-      "explanation",
       "options",
       "correctAnswerIndex",
       "matchingPairs",
-      "difficulty",
       "tags",
-      "sourceLocator",
-      "sourceExcerpt"
+      "sourceLocator"
     ],
     additionalProperties: false
   };
@@ -101,40 +88,6 @@ const CARD_SCHEMA = {
     cardSchema("matching"),
     cardSchema("fill_blank")
   ]
-};
-
-const COVERAGE_SCHEMA = {
-  type: "object",
-  properties: {
-    level: {
-      type: "string",
-      enum: ["low", "medium", "high"]
-    },
-    estimatedKeyConcepts: {
-      type: "integer",
-      minimum: 0,
-      maximum: 500
-    },
-    cardsCreated: {
-      type: "integer",
-      minimum: 1,
-      maximum: 200
-    },
-    omittedImportantTopics: {
-      type: "array",
-      items: {
-        type: "string"
-      },
-      maxItems: 12
-    }
-  },
-  required: [
-    "level",
-    "estimatedKeyConcepts",
-    "cardsCreated",
-    "omittedImportantTopics"
-  ],
-  additionalProperties: false
 };
 
 const DECK_OBJECT_SCHEMA = {
@@ -156,7 +109,6 @@ const DECK_OBJECT_SCHEMA = {
     summary: {
       type: "string"
     },
-    coverage: COVERAGE_SCHEMA,
     cards: {
       type: "array",
       items: CARD_SCHEMA,
@@ -170,7 +122,6 @@ const DECK_OBJECT_SCHEMA = {
     "deckKind",
     "detectedLanguage",
     "summary",
-    "coverage",
     "cards"
   ],
   additionalProperties: false
@@ -214,37 +165,6 @@ export const GENERATION_RESULT_SCHEMA = {
     "action",
     "assistantMessage",
     "deck"
-  ],
-  additionalProperties: false
-};
-
-export const EXTRACTION_SCHEMA = {
-  type: "object",
-  properties: {
-    markdown: {
-      type: "string"
-    },
-    pageCount: {
-      type: "integer",
-      minimum: 0,
-      maximum: 10_000
-    },
-    detectedLanguage: {
-      type: "string"
-    },
-    coverageNotes: {
-      type: "array",
-      items: {
-        type: "string"
-      },
-      maxItems: 20
-    }
-  },
-  required: [
-    "markdown",
-    "pageCount",
-    "detectedLanguage",
-    "coverageNotes"
   ],
   additionalProperties: false
 };

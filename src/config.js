@@ -79,9 +79,6 @@ export const LIMITS = {
  */
 export const MAX_EXTRACT_BYTES = 8 * 1024 * 1024;
 
-// Transcription is long by design; give it most of the output window.
-export const EXTRACTION_OUTPUT_TOKENS = 96_000;
-
 /**
  * A parser that reads the document costs tokens per page, so bytes stop being
  * the binding constraint and a generous byte ceiling is fine. A provider that
@@ -109,15 +106,14 @@ export const REASONING_EFFORTS = ["minimal", "low", "medium", "high"];
 /**
  * Per-task reasoning effort. Defaults stay at the known-working "low" — this
  * exists so the tradeoff can be measured per task without a redeploy, since
- * generation needs judgment (distractors, coverage) while transcription does
- * not.
+ * generation needs judgment (distractors, difficulty) while outline detection
+ * does not.
  *
- * Override with REASONING_GENERATION / _REFINE / _EXTRACTION / _OUTLINE.
+ * Override with REASONING_GENERATION / _REFINE / _OUTLINE.
  */
 const REASONING_DEFAULTS = {
   generation: "low",
   refine: "low",
-  extraction: "low",
   outline: "low"
 };
 
@@ -128,6 +124,58 @@ export function reasoningEffort(task, env = {}) {
   return REASONING_EFFORTS.includes(requested)
     ? requested
     : REASONING_DEFAULTS[task] || "low";
+}
+
+/**
+ * Token prices in USD per million tokens, for the call log's cost column.
+ *
+ * There are no defaults on purpose: a wrong number is worse than a blank,
+ * because it looks authoritative. Set these to the rate card you are actually
+ * billed at and the log starts costing calls; leave them unset and the cost
+ * column reads "n/a".
+ *
+ * Cached input is billed at a discount, so it is priced separately — that is
+ * the whole reason the prompt-cache ordering matters.
+ */
+export function pricing(env = {}) {
+  const rate = (name) => {
+    const parsed = Number(env[name]);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+
+  return {
+    input: rate("PRICE_INPUT_PER_MTOK"),
+    cachedInput: rate("PRICE_CACHED_INPUT_PER_MTOK"),
+    output: rate("PRICE_OUTPUT_PER_MTOK")
+  };
+}
+
+/**
+ * Cached prompt tokens are included in prompt_tokens, so they are subtracted
+ * out before the uncached rate is applied rather than billed twice.
+ */
+export function estimateCostUsd(usage, prices) {
+  if (!usage || prices.input === null || prices.output === null) return null;
+
+  const promptTokens = Number(usage.prompt_tokens) || 0;
+  const cachedTokens = Number(usage.cachedTokens) || 0;
+  const outputTokens = Number(usage.completion_tokens) || 0;
+
+  const billedCached = Math.min(cachedTokens, promptTokens);
+  const billedFresh = promptTokens - billedCached;
+
+  // An unset cached rate falls back to the full input rate, which overstates
+  // rather than understates the bill.
+  const cachedRate =
+    prices.cachedInput === null ? prices.input : prices.cachedInput;
+
+  const cost =
+    (billedFresh * prices.input +
+      billedCached * cachedRate +
+      outputTokens * prices.output) /
+    1_000_000;
+
+  return Number(cost.toFixed(6));
 }
 
 export function estimateFileTokens(byteSize) {

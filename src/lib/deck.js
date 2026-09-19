@@ -82,7 +82,6 @@ function normalizeCard(card, usedIds, validIds = null) {
   let normalizedOptions = options;
   let answer = cleanString(card?.answer);
   let hint = cleanString(card?.hint);
-  let explanation = cleanString(card?.explanation);
   let matchingPairs = [];
 
   if (type === "multiple_choice") {
@@ -109,7 +108,6 @@ function normalizeCard(card, usedIds, validIds = null) {
     matchingPairs = normalizeMatchingPairs(card?.matchingPairs);
     answer = "";
     hint = "";
-    explanation = "";
   }
 
   if (type === "fill_blank") {
@@ -124,13 +122,9 @@ function normalizeCard(card, usedIds, validIds = null) {
     prompt: cleanString(card?.prompt),
     answer,
     hint,
-    explanation,
     options: normalizedOptions,
     correctAnswerIndex,
     matchingPairs,
-    difficulty: ["easy", "medium", "hard"].includes(card?.difficulty)
-      ? card.difficulty
-      : "medium",
     tags: Array.isArray(card?.tags)
       ? [...new Set(
           card.tags
@@ -139,8 +133,7 @@ function normalizeCard(card, usedIds, validIds = null) {
             .filter(Boolean)
         )].slice(0, 8)
       : [],
-    sourceLocator: cleanString(card?.sourceLocator),
-    sourceExcerpt: cleanString(card?.sourceExcerpt)
+    sourceLocator: cleanString(card?.sourceLocator)
   };
 }
 
@@ -174,8 +167,6 @@ export function normalizeGeneratedDeck(
     throw new DeckError("AI generated no usable cards.");
   }
 
-  const coverage = result.deck.coverage || {};
-
   return {
     assistantMessage: cleanString(
       result.assistantMessage,
@@ -189,22 +180,6 @@ export function normalizeGeneratedDeck(
         : "study",
       detectedLanguage: cleanString(result.deck.detectedLanguage),
       summary: cleanString(result.deck.summary),
-      coverage: {
-        level: ["low", "medium", "high"].includes(coverage.level)
-          ? coverage.level
-          : "medium",
-        estimatedKeyConcepts: Number.isInteger(coverage.estimatedKeyConcepts)
-          ? Math.max(0, Math.min(coverage.estimatedKeyConcepts, 500))
-          : cards.length,
-        cardsCreated: cards.length,
-        omittedImportantTopics: Array.isArray(coverage.omittedImportantTopics)
-          ? coverage.omittedImportantTopics
-              .filter((topic) => typeof topic === "string")
-              .map((topic) => topic.trim())
-              .filter(Boolean)
-              .slice(0, 12)
-          : []
-      },
       cards
     },
     // Visible rather than silent: a deck that quietly lost cards should be

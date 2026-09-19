@@ -102,14 +102,18 @@ test("refinement uses role-preserving history and returns a complete deck", asyn
     assert.equal(body.deck.cards.length, 1);
     assert.equal(body.deck.cards[0].id, "card-1");
     assert.equal(body.deck.cards[0].type, "fill_blank");
+    // Layout is the prompt-cache contract: system, then the stable source,
+    // then the history that grows each turn, then this turn's deck + request.
     assert.equal(requestBody.messages[0].role, "system");
-    assert.deepEqual(requestBody.messages.slice(1, 3), [
+    assert.equal(requestBody.messages[1].role, "user");
+    assert.match(requestBody.messages[1].content, /source_material/);
+    assert.deepEqual(requestBody.messages.slice(2, 4), [
       { role: "user", content: "Focus on European capitals." },
       { role: "assistant", content: "The deck now focuses on Europe." }
     ]);
-    assert.equal(requestBody.messages[3].role, "user");
+    assert.equal(requestBody.messages[4].role, "user");
     assert.match(
-      requestBody.messages[3].content,
+      requestBody.messages[4].content,
       /Make that a fill-in-the-blank card\./
     );
     assert.deepEqual(

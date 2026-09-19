@@ -10,7 +10,14 @@ import { DEFAULT_PROVIDER, DEFAULT_DOCUMENT_PROVIDER } from "./config.js";
 import { recordError, isDebugAuthorized } from "./lib/errorLog.js";
 import { isAuthorized, authRequired } from "./lib/auth.js";
 import { errorsPage, isErrorsPageAllowed } from "./routes/errorsPage.js";
-import { extractSource } from "./routes/extractSource.js";
+import { logsPage, isLogsPageAllowed } from "./routes/logsPage.js";
+import {
+  startCall,
+  insertCall,
+  finishCall,
+  pruneCalls,
+  logsEnabled
+} from "./lib/callLog.js";
 import { outlineSource } from "./routes/outlineSource.js";
 import { generateDeck } from "./routes/generateDeck.js";
 import { refineDeck } from "./routes/refineDeck.js";
@@ -64,8 +71,20 @@ function classify(error) {
   };
 }
 
+const ROUTES = {
+  "POST /v1/sources/outline": outlineSource,
+  "POST /v1/decks/generate": generateDeck,
+  "POST /v1/decks/refine": refineDeck,
+  // Keeps older shipped builds working; nothing new should call it.
+  "POST /generate-quiz": legacyQuiz
+};
+
+function routeFor(method, pathname) {
+  return ROUTES[`${method} ${pathname}`] || null;
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
 
@@ -79,6 +98,14 @@ export default {
       }
 
       return errorsPage(request);
+    }
+
+    if (request.method === "GET" && url.pathname === "/logs") {
+      if (!isLogsPageAllowed(request, env)) {
+        return apiError("NOT_FOUND", "Endpoint not found.", 404, requestId);
+      }
+
+      return logsPage(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/") {
@@ -101,7 +128,6 @@ export default {
         },
         endpoints: [
           "POST /v1/sources/outline",
-          "POST /v1/sources/extract",
           "POST /v1/decks/generate",
           "POST /v1/decks/refine",
           "POST /generate-quiz"
@@ -125,49 +151,48 @@ export default {
       return apiError("UNAUTHORIZED", "Missing or invalid API key.", 401, requestId);
     }
 
-    try {
-      if (
-        request.method === "POST" &&
-        url.pathname === "/v1/sources/outline"
-      ) {
-        return await outlineSource(request, env, requestId);
-      }
+    const handler = routeFor(request.method, url.pathname);
 
-      if (
-        request.method === "POST" &&
-        url.pathname === "/v1/sources/extract"
-      ) {
-        return await extractSource(request, env, requestId);
-      }
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/v1/decks/generate"
-      ) {
-        return await generateDeck(request, env, requestId);
-      }
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/v1/decks/refine"
-      ) {
-        return await refineDeck(request, env, requestId);
-      }
-
-      // Keeps your current iOS/test integration working while you migrate.
-      if (
-        request.method === "POST" &&
-        url.pathname === "/generate-quiz"
-      ) {
-        return await legacyQuiz(request, env, requestId);
-      }
-
+    if (!handler) {
       return apiError(
         "NOT_FOUND",
         "Endpoint not found.",
         404,
         requestId
       );
+    }
+
+    // The row opens before the upstream call so an in-flight generation shows
+    // up while it runs, not three minutes later when it settles.
+    const call = startCall({
+      requestId,
+      method: request.method,
+      endpoint: url.pathname
+    });
+
+    if (logsEnabled(env)) {
+      await insertCall(env, call);
+
+      // Trimming on roughly one call in fifty keeps the table bounded without
+      // a scheduled worker, and never blocks a response.
+      if (Math.random() < 0.02) {
+        ctx?.waitUntil?.(pruneCalls(env));
+      }
+    }
+
+    try {
+      const response = await handler(request, env, requestId, call);
+
+      // Logging must not delay the deck the user is waiting on.
+      ctx?.waitUntil?.(
+        finishCall(env, call, {
+          status: response.status < 400 ? "success" : "failed",
+          httpStatus: response.status,
+          errorCode: null
+        })
+      );
+
+      return response;
     } catch (error) {
       console.error(`[${requestId}]`, error);
 
@@ -187,6 +212,14 @@ export default {
         method: request.method,
         path: url.pathname
       });
+
+      ctx?.waitUntil?.(
+        finishCall(env, call, {
+          status: "failed",
+          httpStatus: status,
+          errorCode: code
+        })
+      );
 
       // An authorized caller gets the details in the response itself. The
       // in-memory log lives in one isolate, so a phone error is usually

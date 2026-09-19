@@ -1,20 +1,37 @@
 {
-  "name": "learnalert-api",
-  "main": "src/index.js",
-  "compatibility_date": "2026-09-04",
-  "observability": {
-    "enabled": true
-  },
-  "vars": {
-    // The switcher: "cheaper_inference" or "openai".
-    "AI_PROVIDER": "cheaper_inference",
-    // Set to "true" to let a request pick the provider via X-AI-Provider.
-    "ALLOW_PROVIDER_OVERRIDE": "false",
-    // Which provider parses uploaded documents. AI_PROVIDER overrides this.
-    "DOCUMENT_PROVIDER": "openai",
-    // GET /errors is off. It was a testing aid, and it only ever saw one
-    // isolate's memory. Use X-Debug-Token for error details, or the
-    // Cloudflare dashboard logs. Set to "true" to re-enable.
-    "ERROR_LOG_ENABLED": "false"
-  }
+	"name": "learnalertapi",
+	"main": "src/index.js",
+	"compatibility_date": "2026-09-04",
+	"observability": {
+		"enabled": true
+	},
+	// Backs GET /logs. The schema lives in migrations/, applied with:
+	//   npx wrangler d1 migrations apply learnalert-logs --remote
+	// The binding name is what src/lib/callLog.js reads, so it stays LOGS_DB.
+	// Logging is never on the critical path: if D1 fails, the deck still ships.
+	"d1_databases": [
+		{
+			"binding": "LOGS_DB",
+			"database_name": "learnalert-logs",
+			"database_id": "f4ae21eb-6cab-442c-86ab-f433271e35ac"
+		}
+	],
+	"vars": {
+		// The switcher: "cheaper_inference" or "openai".
+		"AI_PROVIDER": "cheaper_inference",
+		// Set to "true" to let a request pick the provider via X-AI-Provider.
+		"ALLOW_PROVIDER_OVERRIDE": "false",
+		// Which provider parses uploaded documents. AI_PROVIDER overrides this.
+		"DOCUMENT_PROVIDER": "openai",
+		// GET /errors is off. It was a testing aid, and it only ever saw one
+		// isolate's memory. Use X-Debug-Token for error details, or the
+		// Cloudflare dashboard logs. Set to "true" to re-enable.
+		"ERROR_LOG_ENABLED": "false",
+		// Token prices in USD per million tokens, for the /logs cost column.
+		// Left empty on purpose: costs read "n/a" rather than showing a number
+		// that was guessed. Fill in the rate card you are billed at.
+		"PRICE_INPUT_PER_MTOK": "",
+		"PRICE_CACHED_INPUT_PER_MTOK": "",
+		"PRICE_OUTPUT_PER_MTOK": ""
+	}
 }

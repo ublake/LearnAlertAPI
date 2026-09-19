@@ -6,8 +6,10 @@ const BASE_HEADERS = {
   "Cache-Control": "no-store"
 };
 
+// Compact, not pretty-printed: a 200-card deck carries enough nesting that
+// indentation is a real share of the payload, and no client reads it by eye.
 export function json(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
+  return new Response(JSON.stringify(data), {
     status,
     headers: {
       ...BASE_HEADERS,

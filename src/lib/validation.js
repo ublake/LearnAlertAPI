@@ -339,26 +339,6 @@ export class ValidationError extends Error {
  * Extraction routes to a provider that parses documents natively, so it is
  * bounded by file size rather than by the inline token budget.
  */
-export function validateExtractForm(formData) {
-  const file = formData.get("file");
-
-  if (!(file instanceof File)) {
-    throw new ValidationError("file is required for extraction.");
-  }
-
-  const { filename, mimeType, sourceKind } = validateUploadedFile(
-    file,
-    MAX_EXTRACT_BYTES
-  );
-
-  return {
-    file,
-    mimeType,
-    sourceKind,
-    sourceName: optionalString(formData.get("sourceName"), 200) || filename
-  };
-}
-
 export function validateOutlineRequest(body) {
   if (!body || typeof body !== "object") {
     throw new ValidationError("Request body must be a JSON object.");

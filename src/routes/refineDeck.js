@@ -14,8 +14,9 @@ import {
   validateRefineForm
 } from "../lib/validation.js";
 import { json } from "../lib/http.js";
+import { recordAttempt } from "../lib/callLog.js";
 
-export async function refineDeck(request, env, requestId) {
+export async function refineDeck(request, env, requestId, call = null) {
   const contentType = request.headers.get("content-type") || "";
 
   // The document provider decides the ceiling, and it is known before the
@@ -40,12 +41,11 @@ export async function refineDeck(request, env, requestId) {
       ? `<source_material name="${config.sourceName || "source"}">\n${config.sourceText}\n</source_material>`
       : "<source_material>No source material was supplied. Do not introduce new factual claims beyond what is already supported by the current deck.</source_material>";
 
-  // Order matters for prompt caching: the cache matches on prefix, so stable
-  // content goes first and anything that changes every turn goes last. The
-  // source is identical across a conversation; the deck is not.
-  const contextText = `
-${sourceContext}
-
+  // Order matters for prompt caching: the cache matches on an exact prefix, so
+  // the source — byte-identical on every turn of a session — gets its own
+  // leading message, ahead of the history that grows each turn. The deck and
+  // the request change every turn, so they go last and are never cacheable.
+  const turnText = `
 <maximum_cards>
 ${config.maxCards}
 </maximum_cards>
@@ -60,7 +60,7 @@ ${config.instruction}
 `.trim();
 
   let source = null;
-  let input;
+  let sourceMessage;
 
   if (config.file) {
     const encoded = await encodeSourceFile(config.file, config.mimeType);
@@ -72,29 +72,36 @@ ${config.instruction}
       byteSize: encoded.byteSize
     };
 
-    input = [
-      ...config.chatHistory,
-      {
-        role: "user",
-        content: [
-          textContentItem(contextText),
-          sourceContentItem({
-            dataUrl: encoded.dataUrl,
-            filename: encoded.filename,
-            sourceKind: source.kind
-          })
-        ]
-      }
-    ];
+    sourceMessage = {
+      role: "user",
+      content: [
+        textContentItem(sourceContext),
+        sourceContentItem({
+          dataUrl: encoded.dataUrl,
+          filename: encoded.filename,
+          sourceKind: source.kind
+        })
+      ]
+    };
   } else {
-    input = [
-      ...config.chatHistory,
-      {
-        role: "user",
-        content: contextText
-      }
-    ];
+    sourceMessage = {
+      role: "user",
+      content: sourceContext
+    };
   }
+
+  const input = [
+    sourceMessage,
+    ...config.chatHistory,
+    {
+      role: "user",
+      content: turnText
+    }
+  ];
+
+  recordAttempt(call, {
+    sourceType: source ? source.kind : config.sourceText ? "text" : "none"
+  });
 
   const ai = await callStructuredOutput({
     env,
@@ -105,6 +112,12 @@ ${config.instruction}
     schemaName: "learnalert_refined_deck",
     maxOutputTokens: outputBudget(config.maxCards),
     reasoningEffort: reasoningEffort("refine", env)
+  });
+
+  recordAttempt(call, {
+    provider: ai.provider,
+    model: ai.model,
+    usage: ai.usage
   });
 
   const validIds = new Set(

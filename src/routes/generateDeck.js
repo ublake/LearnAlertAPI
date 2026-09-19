@@ -19,6 +19,7 @@ import {
   validateGenerateForm
 } from "../lib/validation.js";
 import { json } from "../lib/http.js";
+import { recordAttempt } from "../lib/callLog.js";
 
 function buildPreferences(config) {
   return {
@@ -35,7 +36,7 @@ function buildPreferences(config) {
   };
 }
 
-export async function generateDeck(request, env, requestId) {
+export async function generateDeck(request, env, requestId, call = null) {
   const contentType = request.headers.get("content-type") || "";
   const isUpload = contentType.includes("multipart/form-data");
 
@@ -47,7 +48,7 @@ export async function generateDeck(request, env, requestId) {
 
   let config;
   let source = null;
-  let input;
+  let sourceMessage;
 
   if (isUpload) {
     const formData = await request.formData();
@@ -62,46 +63,49 @@ export async function generateDeck(request, env, requestId) {
       byteSize: encoded.byteSize
     };
 
-    input = [
-      ...config.chatHistory,
-      {
-        role: "user",
-        content: [
-          textContentItem(
-            `Generation preferences:\n${JSON.stringify(
-              buildPreferences(config),
-              null,
-              2
-            )}\n\nAnalyze the attached original source directly. Preserve and use meaningful layout, tables, columns, diagrams, labels, and visual relationships when they affect the study content.`
-          ),
-          sourceContentItem({
-            dataUrl: encoded.dataUrl,
-            filename: encoded.filename,
-            sourceKind: source.kind
-          })
-        ]
-      }
-    ];
+    sourceMessage = {
+      role: "user",
+      content: [
+        textContentItem(
+          "Analyze the attached original source directly. Preserve and use meaningful layout, tables, columns, diagrams, labels, and visual relationships when they affect the study content."
+        ),
+        sourceContentItem({
+          dataUrl: encoded.dataUrl,
+          filename: encoded.filename,
+          sourceKind: source.kind
+        })
+      ]
+    };
   } else {
     const body = await request.json();
     config = validateGenerateRequest(body);
 
-    input = [
-      ...config.chatHistory,
-      {
-        role: "user",
-        content: `
-<generation_preferences>
-${JSON.stringify(buildPreferences(config), null, 2)}
-</generation_preferences>
-
-<source_material>
-${config.text}
-</source_material>
-`.trim()
-      }
-    ];
+    sourceMessage = {
+      role: "user",
+      content: `<source_material>\n${config.text}\n</source_material>`
+    };
   }
+
+  // Order matters for prompt caching: the cache matches on an exact prefix, so
+  // the source goes first and stays byte-identical across a session's turns,
+  // while the history grows behind it. Preferences change per call, so they go
+  // last — which also puts the instructions closest to the reply.
+  const input = [
+    sourceMessage,
+    ...config.chatHistory,
+    {
+      role: "user",
+      content: `<generation_preferences>\n${JSON.stringify(
+        buildPreferences(config),
+        null,
+        2
+      )}\n</generation_preferences>`
+    }
+  ];
+
+  recordAttempt(call, {
+    sourceType: source ? source.kind : "text"
+  });
 
   const ai = await callStructuredOutput({
     env,
@@ -112,6 +116,12 @@ ${config.text}
     schemaName: "learnalert_generation_result",
     maxOutputTokens: outputBudget(config.maxCards),
     reasoningEffort: reasoningEffort("generation", env)
+  });
+
+  recordAttempt(call, {
+    provider: ai.provider,
+    model: ai.model,
+    usage: ai.usage
   });
 
   const normalized = normalizeGenerationResult(

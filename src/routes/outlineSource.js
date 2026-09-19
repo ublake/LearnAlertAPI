@@ -7,6 +7,7 @@ import {
 } from "../lib/ai.js";
 import { validateOutlineRequest } from "../lib/validation.js";
 import { json } from "../lib/http.js";
+import { recordAttempt } from "../lib/callLog.js";
 
 /**
  * The model can misnumber pages, overlap sections, or leave gaps. Clamp and
@@ -50,7 +51,7 @@ function normalizeSections(sections, lastPage) {
   return disjoint;
 }
 
-export async function outlineSource(request, env, requestId) {
+export async function outlineSource(request, env, requestId, call = null) {
   const config = validateOutlineRequest(await request.json());
 
   // Snippets are text, so this takes the cheap provider.
@@ -79,6 +80,13 @@ export async function outlineSource(request, env, requestId) {
     schemaName: "learnalert_source_outline",
     maxOutputTokens: OUTLINE.OUTPUT_TOKENS,
     reasoningEffort: reasoningEffort("outline", env)
+  });
+
+  recordAttempt(call, {
+    provider: ai.provider,
+    model: ai.model,
+    usage: ai.usage,
+    sourceType: "snippets"
   });
 
   const sections = normalizeSections(ai.value.sections, lastPage);

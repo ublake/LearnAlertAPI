@@ -40,10 +40,6 @@ it needs.
                      └────────────────┘
 ```
 
-`/v1/sources/extract` is an optional shortcut: transcribe a document **once**
-into text, then generate as many decks from that text as you like without ever
-re-parsing the file.
-
 ---
 
 ## Endpoints
@@ -51,8 +47,8 @@ re-parsing the file.
 | Method | Path | Give it | Get back |
 | --- | --- | --- | --- |
 | `GET` | `/` | — | Health, and which AI providers are live |
+| `GET` | `/logs` | — | Every call: tokens, status, provider, cost |
 | `POST` | `/v1/sources/outline` | The first ~240 chars of each page | Section list with page ranges |
-| `POST` | `/v1/sources/extract` | A file | Full Markdown + a `contentHash` |
 | `POST` | `/v1/decks/generate` | A file **or** text | A deck, or a chat reply |
 | `POST` | `/v1/decks/refine` | A deck + an instruction | The updated deck, or a chat reply |
 | `POST` | `/generate-quiz` | Text | Legacy shape, kept for the old app |
@@ -118,12 +114,6 @@ get `deck`. **Branch on `action`** — never assume a deck came back.
     "deckKind": "language_learning",
     "detectedLanguage": "es",
     "summary": "Subject pronouns and present-tense ser",
-    "coverage": {
-      "level": "high",
-      "cardsCreated": 50,
-      "estimatedKeyConcepts": 62,
-      "omittedImportantTopics": ["past tense"]
-    },
     "cards": [ ... ]
   },
   "droppedCards": [],
@@ -131,7 +121,6 @@ get `deck`. **Branch on `action`** — never assume a deck came back.
 }
 ```
 
-`coverage.omittedImportantTopics` is the AI telling you what it could not fit.
 `droppedCards` lists cards that failed validation and were skipped — the rest of
 the deck is still good.
 
@@ -154,14 +143,11 @@ come back empty, never missing.
   "prompt": "Which pronoun is formal?",
   "answer": "usted",
   "hint": "Used with strangers",
-  "explanation": "usted is the formal singular you.",
   "options": ["tú", "usted", "vos", "vosotros"],
   "correctAnswerIndex": 1,
   "matchingPairs": [],
-  "difficulty": "medium",
   "tags": ["pronouns"],
-  "sourceLocator": "p. 15",
-  "sourceExcerpt": "usted is used in formal settings."
+  "sourceLocator": "p. 15"
 }
 ```
 
@@ -248,35 +234,6 @@ overlapping and clamped. `kind` is `module` · `chapter` · `section` ·
 > Try `PDFDocument.outlineRoot` first — most textbooks carry their own bookmark
 > tree, which gives you exact sections for free. This endpoint is the fallback.
 
-### POST /v1/sources/extract
-
-Transcribes a document into Markdown once, so later decks run on text.
-
-```bash
-curl -X POST .../v1/sources/extract -F 'file=@SpanishModule.pdf'
-```
-
-```json
-{
-  "contentHash": "9f2b...c41e",
-  "extraction": {
-    "markdown": "## Page 1\n\nla mesa — the table\n...",
-    "pageCount": 42,
-    "detectedLanguage": "es",
-    "coverageNotes": [],
-    "estimatedTokens": 28120
-  }
-}
-```
-
-Store the Markdown and send it as `text` from then on. `contentHash` is the
-SHA-256 of the bytes — keep it, and skip extraction when the user picks the same
-file again. Nothing is cached server-side.
-
-`coverageNotes` lists anything that could not be transcribed, such as an
-illegible scan. Empty means the transcription is believed complete.
-
----
 
 ## Errors
 
@@ -315,6 +272,64 @@ memory, so an error from a phone rarely appeared in a browser. Use
 `X-Debug-Token` above, or the Cloudflare dashboard logs.
 
 ---
+
+## GET /logs
+
+A rolling log of every call that spends money upstream, so you can see what
+the app is actually costing you without opening the Cloudflare dashboard.
+
+```
+When      Status        Endpoint             Source  Provider     Tokens in  Tokens out  Took    Cost
+2m ago    success       /v1/decks/generate   file    openai         141,238       9,210  28.0s   $0.269
+40s ago   failed        /v1/decks/refine     text    cheaper_...          0           0   2.0s   $0
+just now  in-progress   /v1/decks/generate   —       —                    —           —      —      —
+```
+
+A row opens the moment work starts, so a generation that takes three minutes
+is visible while it runs rather than appearing only once it settles. The page
+refreshes every 15 seconds, or every 5 while something is in flight. Add
+`?format=json` for the same data as JSON, `?limit=n` for more or fewer rows.
+
+Rows are kept **7 days** and pruned opportunistically, so the table stays small
+without a scheduled worker.
+
+### Setup
+
+```bash
+npx wrangler d1 create learnalert-logs
+# paste the printed database_id into wrangler.jsonc
+npx wrangler d1 execute learnalert-logs --remote --file=./migrations/0001_call_log.sql
+npx wrangler secret put DEBUG_TOKEN
+```
+
+Then open `https://your-api/logs?token=...`.
+
+`/logs` **fails closed**: with no `DEBUG_TOKEN` set it answers 404 to everyone.
+It sits in front of the API-key check so a browser can reach it, and traffic
+volume and spend are not public information. It carries no prompts, deck
+content, or source text — only metadata about each call.
+
+Until `database_id` is filled in, `/logs` answers 503 and the rest of the API
+runs exactly as before. Logging is never on the critical path: a D1 failure is
+logged to the console and the deck still goes out.
+
+### Costs
+
+The cost column reads `n/a` until you set your rate card, in USD per million
+tokens:
+
+| Var | Meaning |
+| --- | --- |
+| `PRICE_INPUT_PER_MTOK` | Uncached input tokens |
+| `PRICE_CACHED_INPUT_PER_MTOK` | Cached input tokens, usually far cheaper |
+| `PRICE_OUTPUT_PER_MTOK` | Output tokens |
+
+No rates are assumed, because a guessed number looks authoritative. Cached
+tokens are subtracted from the prompt total before the uncached rate applies,
+rather than billed twice. If the cached rate is unset, cached tokens fall back
+to the full input rate, which overstates rather than understates the bill.
+
+Figures are an estimate from the usage each provider reports, not a bill.
 
 ## Authentication
 
@@ -373,7 +388,7 @@ Secrets, set in the Cloudflare dashboard:
 | --- | --- |
 | `CHEAPER_INFERENCE_API_KEY` | Text requests |
 | `OPENAI_API_KEY` | Document requests |
-| `DEBUG_TOKEN` | Optional. Unlocks `error.details`. |
+| `DEBUG_TOKEN` | Unlocks `error.details` **and** `GET /logs`. |
 | `API_KEYS` | Comma-separated client keys. Unset = open. |
 
 Variables, in `wrangler.jsonc` or the dashboard:
@@ -385,7 +400,16 @@ Variables, in `wrangler.jsonc` or the dashboard:
 | `AI_MODEL` | — | Override the model |
 | `ALLOW_PROVIDER_OVERRIDE` | `false` | Honour an `X-AI-Provider` header |
 | `ERROR_LOG_ENABLED` | `false` | Serve `GET /errors` (off) |
-| `REASONING_GENERATION` | `low` | Also `_REFINE`, `_EXTRACTION`, `_OUTLINE` |
+| `REASONING_GENERATION` | `low` | Also `_REFINE`, `_OUTLINE` |
+| `PRICE_INPUT_PER_MTOK` | — | USD per 1M input tokens, for `/logs` |
+| `PRICE_CACHED_INPUT_PER_MTOK` | — | USD per 1M cached input tokens |
+| `PRICE_OUTPUT_PER_MTOK` | — | USD per 1M output tokens |
+
+Bindings, in `wrangler.jsonc`:
+
+| Binding | For |
+| --- | --- |
+| `LOGS_DB` | D1 database behind `GET /logs`. Unbound = `/logs` is 503. |
 
 There is no key fallback between providers: whichever is selected must have its
 own secret, or the request fails with a 500 naming the missing variable before

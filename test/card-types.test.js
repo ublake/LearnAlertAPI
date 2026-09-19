@@ -51,7 +51,6 @@ test("normalizes a matching card with 2 to 4 unique pairs", () => {
   assert.equal(card.type, "matching");
   assert.equal(card.answer, "");
   assert.equal(card.hint, "");
-  assert.equal(card.explanation, "");
   assert.deepEqual(card.options, []);
   assert.equal(card.correctAnswerIndex, -1);
   assert.deepEqual(card.matchingPairs, [
@@ -116,7 +115,6 @@ test("an unsalvageable card is dropped without killing the deck", () => {
   // The good card survives. This is the whole point of the change.
   assert.equal(normalized.deck.cards.length, 1);
   assert.equal(normalized.deck.cards[0].id, "good-1");
-  assert.equal(normalized.deck.coverage.cardsCreated, 1);
 
   assert.equal(normalized.droppedCards.length, 2);
   assert.deepEqual(

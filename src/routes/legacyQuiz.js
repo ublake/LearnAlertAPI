@@ -1,6 +1,6 @@
 import { generateDeck } from "./generateDeck.js";
 
-export async function legacyQuiz(request, env, requestId) {
+export async function legacyQuiz(request, env, requestId, call = null) {
   const originalBody = await request.json();
 
   const questionCount = Math.min(
@@ -29,7 +29,8 @@ export async function legacyQuiz(request, env, requestId) {
   const response = await generateDeck(
     translatedRequest,
     env,
-    requestId
+    requestId,
+    call
   );
 
   const data = await response.json();
@@ -68,7 +69,9 @@ export async function legacyQuiz(request, env, requestId) {
       hint: card.hint,
       answers: card.options,
       correctAnswerIndex: card.correctAnswerIndex,
-      explanation: card.explanation
+      // The deck schema no longer carries per-card explanations; the key stays
+      // so the legacy response shape does not change.
+      explanation: ""
     }));
 
   return new Response(

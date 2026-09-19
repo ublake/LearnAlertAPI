@@ -123,7 +123,6 @@ test("normalizes a deck generation response", () => {
 
   assert.equal(result.action, "deck");
   assert.equal(result.deck.cards.length, 1);
-  assert.equal(result.deck.coverage.cardsCreated, 1);
 });
 
 test("rejects a deck response without a deck", () => {
@@ -205,8 +204,12 @@ test("generate endpoint returns the AI-selected chat action", async () => {
       requestBody.response_format.json_schema.schema,
       GENERATION_RESULT_SCHEMA
     );
+    // Layout is the prompt-cache contract: system, then the stable source,
+    // then the history that grows each turn, then this turn's preferences.
     assert.equal(requestBody.messages[0].role, "system");
-    assert.deepEqual(requestBody.messages.slice(1, 3), [
+    assert.equal(requestBody.messages[1].role, "user");
+    assert.match(requestBody.messages[1].content, /<source_material>\nhello/);
+    assert.deepEqual(requestBody.messages.slice(2, 4), [
       {
         role: "user",
         content: "Create Spanish cards."
@@ -216,8 +219,11 @@ test("generate endpoint returns the AI-selected chat action", async () => {
         content: "Send your notes."
       }
     ]);
-    assert.equal(requestBody.messages[3].role, "user");
-    assert.match(requestBody.messages[3].content, /<source_material>\nhello/);
+    assert.equal(requestBody.messages[4].role, "user");
+    assert.match(
+      requestBody.messages[4].content,
+      /<generation_preferences>/
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -73,6 +73,12 @@ function lastUserParts(body) {
   return body.messages[body.messages.length - 1].content;
 }
 
+// The source now leads the conversation (after the system prompt) so it sits
+// in the cacheable prefix.
+function sourceParts(body) {
+  return body.messages[1].content;
+}
+
 test("multipart generation inlines a PDF as a base64 data URL", async () => {
   const originalFetch = globalThis.fetch;
   const calls = stubFetch({ action: "deck", ...DECK_PAYLOAD });
@@ -100,7 +106,7 @@ test("multipart generation inlines a PDF as a base64 data URL", async () => {
     assert.equal(calls.url, "https://api.openai.com/v1/chat/completions");
     assert.equal(calls.headers.Authorization, "Bearer sk-test");
 
-    const parts = lastUserParts(calls.body);
+    const parts = sourceParts(calls.body);
     const filePart = parts.find((part) => part.type === "file");
 
     assert.equal(parts[0].type, "text");
@@ -139,7 +145,7 @@ test("multipart generation inlines an image as an image_url part", async () => {
       "request-inline-image"
     );
 
-    const imagePart = lastUserParts(calls.body).find(
+    const imagePart = sourceParts(calls.body).find(
       (part) => part.type === "image_url"
     );
 
@@ -178,7 +184,7 @@ test("refinement re-attaches a resent file from multipart", async () => {
     );
     const body = await response.json();
 
-    const parts = lastUserParts(calls.body);
+    const parts = sourceParts(calls.body);
 
     assert.match(parts[0].text, /source_note/);
     assert.equal(parts[1].file.filename, "notes.pdf");
@@ -209,7 +215,7 @@ test("refinement without a source falls back to the deck-only note", async () =>
 
     // A stale sourceId from the old files-API flow must not claim an attachment.
     assert.match(
-      lastUserParts(calls.body),
+      sourceParts(calls.body),
       /No source material was supplied/
     );
     // No file means no reason to leave the cheap provider.
