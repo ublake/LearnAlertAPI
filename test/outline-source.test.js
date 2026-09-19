@@ -177,3 +177,88 @@ test("snippets are truncated so long pages cannot inflate cost", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("cached prompt tokens are surfaced in meta", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        id: "r",
+        model: "m",
+        usage: {
+          prompt_tokens: 10_000,
+          completion_tokens: 500,
+          prompt_tokens_details: { cached_tokens: 8_000 }
+        },
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                sections: [
+                  {
+                    title: "A",
+                    kind: "module",
+                    startPage: 0,
+                    endPage: 1,
+                    summary: ""
+                  }
+                ]
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+
+  try {
+    const body = await (
+      await worker.fetch(outlineRequest(PAGES), ENV)
+    ).json();
+
+    assert.equal(body.meta.usage.cachedTokens, 8_000);
+    assert.equal(body.meta.usage.cachedFraction, 0.8);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a provider that reports no cache detail yields null, not zero", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        id: "r",
+        model: "m",
+        usage: { prompt_tokens: 10_000, completion_tokens: 500 },
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                sections: [
+                  { title: "A", kind: "module", startPage: 0, endPage: 1, summary: "" }
+                ]
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+
+  try {
+    const body = await (
+      await worker.fetch(outlineRequest(PAGES), ENV)
+    ).json();
+
+    // null means "unknown", which is different from "nothing was cached".
+    assert.equal(body.meta.usage.cachedTokens, null);
+    assert.equal(body.meta.usage.cachedFraction, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

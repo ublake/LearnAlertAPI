@@ -249,10 +249,22 @@ export async function callStructuredOutput({
     );
   }
 
+  const usage = data.usage || null;
+  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? null;
+
   return {
     value: parsed,
     responseId: data.id,
-    usage: data.usage || null,
+    usage: usage && {
+      ...usage,
+      // Hoisted: the nested field is easy to miss, and it is the only way to
+      // tell whether prompt caching is actually working.
+      cachedTokens,
+      cachedFraction:
+        cachedTokens !== null && usage.prompt_tokens
+          ? Number((cachedTokens / usage.prompt_tokens).toFixed(3))
+          : null
+    },
     model: data.model || target.model,
     provider: target.name
   };

@@ -40,7 +40,12 @@ export async function refineDeck(request, env, requestId) {
       ? `<source_material name="${config.sourceName || "source"}">\n${config.sourceText}\n</source_material>`
       : "<source_material>No source material was supplied. Do not introduce new factual claims beyond what is already supported by the current deck.</source_material>";
 
+  // Order matters for prompt caching: the cache matches on prefix, so stable
+  // content goes first and anything that changes every turn goes last. The
+  // source is identical across a conversation; the deck is not.
   const contextText = `
+${sourceContext}
+
 <maximum_cards>
 ${config.maxCards}
 </maximum_cards>
@@ -52,8 +57,6 @@ ${JSON.stringify(config.deck)}
 <user_request>
 ${config.instruction}
 </user_request>
-
-${sourceContext}
 `.trim();
 
   let source = null;
