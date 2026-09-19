@@ -358,7 +358,12 @@ test("GET /logs renders the page and serves JSON", async () => {
     assert.match(page.headers.get("content-type"), /text\/html/);
     assert.match(html, /\/v1\/decks\/generate/);
     assert.match(html, /success/);
-    assert.match(html, /12,000/);
+    // Large token counts are abbreviated in the table.
+    assert.match(html, /12k/);
+    // Charts, filter row, and the filtered totals block are all present.
+    assert.match(html, /<svg /);
+    assert.match(html, /Totals &mdash; |Totals — /);
+    assert.match(html, /range=1h/);
     // No rates configured, so costs must not show an invented number.
     assert.match(html, /n\/a/);
 
