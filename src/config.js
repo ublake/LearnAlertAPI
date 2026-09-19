@@ -94,6 +94,16 @@ export function uploadCeilingBytes(provider) {
     : LIMITS.MAX_UPLOAD_BYTES;
 }
 
+/**
+ * Outline detection reads only the opening lines of each page, which is why it
+ * is ~0.1% the cost of sending the document itself.
+ */
+export const OUTLINE = {
+  MAX_PAGES: 1_000,
+  MAX_SNIPPET_CHARS: 240,
+  OUTPUT_TOKENS: 16_000
+};
+
 export function estimateFileTokens(byteSize) {
   return Math.ceil(byteSize / BYTES_PER_TOKEN);
 }

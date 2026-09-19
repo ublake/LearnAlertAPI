@@ -6,6 +6,7 @@ import {
   LANGUAGE_DIRECTIONS,
   ALLOWED_UPLOAD_EXTENSIONS,
   MAX_EXTRACT_BYTES,
+  OUTLINE,
   estimateFileTokens
 } from "../config.js";
 
@@ -355,5 +356,43 @@ export function validateExtractForm(formData) {
     mimeType,
     sourceKind,
     sourceName: optionalString(formData.get("sourceName"), 200) || filename
+  };
+}
+
+export function validateOutlineRequest(body) {
+  if (!body || typeof body !== "object") {
+    throw new ValidationError("Request body must be a JSON object.");
+  }
+
+  if (!Array.isArray(body.pages) || body.pages.length === 0) {
+    throw new ValidationError("pages is required and must be a non-empty array.");
+  }
+
+  if (body.pages.length > OUTLINE.MAX_PAGES) {
+    throw new ValidationError(
+      `Too many pages: ${body.pages.length.toLocaleString()}. ` +
+        `The maximum is ${OUTLINE.MAX_PAGES.toLocaleString()}.`,
+      { received: body.pages.length, maximum: OUTLINE.MAX_PAGES }
+    );
+  }
+
+  const pages = body.pages
+    .map((page, position) => ({
+      index: Number.isInteger(page?.index) ? page.index : position,
+      // Only the opening lines are needed; anything more is wasted spend.
+      snippet: optionalString(page?.snippet, OUTLINE.MAX_SNIPPET_CHARS)
+    }))
+    .sort((a, b) => a.index - b.index);
+
+  if (pages.every((page) => !page.snippet)) {
+    throw new ValidationError(
+      "Every page snippet was empty. The document may be a scan with no text " +
+        "layer; run OCR before requesting an outline."
+    );
+  }
+
+  return {
+    pages,
+    sourceName: optionalString(body.sourceName, 200) || "Untitled document"
   };
 }

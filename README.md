@@ -19,6 +19,49 @@ Pasted notes can still use the existing JSON text request.
 ### GET /
 Health check.
 
+### POST /v1/sources/outline — find a document's sections
+
+Detects module/chapter boundaries so a user can study one section instead of a
+whole textbook. Send only the **opening lines of each page**, never the file:
+
+```json
+{
+  "sourceName": "Spanish 101",
+  "pages": [
+    { "index": 0, "snippet": "Spanish 101 — Table of Contents" },
+    { "index": 1, "snippet": "Módulo 1: Saludos" },
+    { "index": 2, "snippet": "Módulo 2: Ser y Estar" }
+  ]
+}
+```
+
+```json
+{
+  "success": true,
+  "pageCount": 200,
+  "sections": [
+    { "title": "Módulo 1: Saludos", "kind": "module",
+      "startPage": 1, "endPage": 10, "pageCount": 10,
+      "summary": "Greetings and introductions" }
+  ],
+  "meta": { "provider": "cheaper_inference", "usage": {} }
+}
+```
+
+Page indices are **zero-based**, matching PDFKit. `kind` is one of `module`,
+`chapter`, `section`, `front_matter`, `back_matter`, `other`. Returned ranges
+are guaranteed sorted, non-overlapping, and clamped to the pages you sent —
+the model's answer is repaired server-side, not trusted.
+
+Limits: 1,000 pages, snippets truncated to 240 characters. A 200-page document
+costs roughly 12k tokens on the cheap provider, about **0.1% of sending the
+PDF**. Requests where every snippet is empty are rejected with a hint to run
+OCR first.
+
+**Try the PDF's own outline before calling this.** `PDFDocument.outlineRoot`
+gives exact section boundaries for free, instantly, with no API call. This
+endpoint is the fallback for documents that have no bookmark tree.
+
 ### POST /v1/sources/extract — transcribe a document once
 
 The cheap path. Converts a document into complete Markdown **one time**, so

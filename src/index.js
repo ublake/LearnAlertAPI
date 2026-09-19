@@ -10,6 +10,7 @@ import { DEFAULT_PROVIDER, DEFAULT_DOCUMENT_PROVIDER } from "./config.js";
 import { recordError, isDebugAuthorized } from "./lib/errorLog.js";
 import { errorsPage, isErrorsPageAllowed } from "./routes/errorsPage.js";
 import { extractSource } from "./routes/extractSource.js";
+import { outlineSource } from "./routes/outlineSource.js";
 import { generateDeck } from "./routes/generateDeck.js";
 import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
@@ -95,6 +96,7 @@ export default {
           )
         },
         endpoints: [
+          "POST /v1/sources/outline",
           "POST /v1/sources/extract",
           "POST /v1/decks/generate",
           "POST /v1/decks/refine",
@@ -104,6 +106,13 @@ export default {
     }
 
     try {
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/sources/outline"
+      ) {
+        return await outlineSource(request, env, requestId);
+      }
+
       if (
         request.method === "POST" &&
         url.pathname === "/v1/sources/extract"

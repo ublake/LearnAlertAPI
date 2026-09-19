@@ -248,3 +248,48 @@ export const EXTRACTION_SCHEMA = {
   ],
   additionalProperties: false
 };
+
+export const OUTLINE_SCHEMA = {
+  type: "object",
+  properties: {
+    sections: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string"
+          },
+          kind: {
+            type: "string",
+            enum: [
+              "module",
+              "chapter",
+              "section",
+              "front_matter",
+              "back_matter",
+              "other"
+            ]
+          },
+          startPage: {
+            type: "integer",
+            minimum: 0
+          },
+          endPage: {
+            type: "integer",
+            minimum: 0
+          },
+          summary: {
+            type: "string"
+          }
+        },
+        required: ["title", "kind", "startPage", "endPage", "summary"],
+        additionalProperties: false
+      },
+      minItems: 1,
+      maxItems: 200
+    }
+  },
+  required: ["sections"],
+  additionalProperties: false
+};
