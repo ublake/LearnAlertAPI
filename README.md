@@ -55,7 +55,6 @@ re-parsing the file.
 | `POST` | `/v1/sources/extract` | A file | Full Markdown + a `contentHash` |
 | `POST` | `/v1/decks/generate` | A file **or** text | A deck, or a chat reply |
 | `POST` | `/v1/decks/refine` | A deck + an instruction | The updated deck, or a chat reply |
-| `GET` | `/errors` | — | Recent errors (debug only) |
 | `POST` | `/generate-quiz` | Text | Legacy shape, kept for the old app |
 
 **You only need `/v1/decks/generate` and `/v1/decks/refine` to build the whole
@@ -310,10 +309,10 @@ include `error.details` — token counts, upstream payloads, field lengths:
                         "startsWith": "...", "endsWith": "..." } }
 ```
 
-`GET /errors` shows the last 5 minutes as a page, but it reads one Cloudflare
-isolate's memory — an error from a phone will usually **not** appear in a
-browser on another device. Use `X-Debug-Token`, or the Cloudflare dashboard
-logs, for anything cross-device.
+`GET /errors` is **disabled** (`ERROR_LOG_ENABLED` is `"false"`). It was a
+testing aid and a poor one: it only ever saw a single Cloudflare isolate's
+memory, so an error from a phone rarely appeared in a browser. Use
+`X-Debug-Token` above, or the Cloudflare dashboard logs.
 
 ---
 
@@ -385,7 +384,7 @@ Variables, in `wrangler.jsonc` or the dashboard:
 | `DOCUMENT_PROVIDER` | `openai` | Provider for files |
 | `AI_MODEL` | — | Override the model |
 | `ALLOW_PROVIDER_OVERRIDE` | `false` | Honour an `X-AI-Provider` header |
-| `ERROR_LOG_ENABLED` | `true` | Serve `GET /errors` |
+| `ERROR_LOG_ENABLED` | `false` | Serve `GET /errors` (off) |
 | `REASONING_GENERATION` | `low` | Also `_REFINE`, `_EXTRACTION`, `_OUTLINE` |
 
 There is no key fallback between providers: whichever is selected must have its

@@ -12,7 +12,9 @@
     "ALLOW_PROVIDER_OVERRIDE": "false",
     // Which provider parses uploaded documents. AI_PROVIDER overrides this.
     "DOCUMENT_PROVIDER": "openai",
-    // Serves GET /errors. Set a DEBUG_TOKEN secret to require a token.
-    "ERROR_LOG_ENABLED": "true"
+    // GET /errors is off. It was a testing aid, and it only ever saw one
+    // isolate's memory. Use X-Debug-Token for error details, or the
+    // Cloudflare dashboard logs. Set to "true" to re-enable.
+    "ERROR_LOG_ENABLED": "false"
   }
 }
