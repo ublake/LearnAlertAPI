@@ -290,6 +290,7 @@ illegible scan. Empty means the transcription is believed complete.
 | --- | --- | --- |
 | `VALIDATION_ERROR` | 400 | Bad request. Do not retry. |
 | `INVALID_JSON` | 400 | Malformed body. |
+| `UNAUTHORIZED` | 401 | Missing or invalid API key. |
 | `AI_INVALID_OUTPUT` | 502 | Model returned unusable content. Retry may work. |
 | `AI_REQUEST_FAILED` | 4xx/502 | Upstream provider failed. |
 | `INTERNAL_ERROR` | 500 | A bug here. Report it with the `requestId`. |
@@ -315,6 +316,36 @@ browser on another device. Use `X-Debug-Token`, or the Cloudflare dashboard
 logs, for anything cross-device.
 
 ---
+
+## Authentication
+
+Every endpoint that costs money requires an API key once one is configured:
+
+```bash
+curl -X POST https://api.learnalertapp.com/v1/decks/generate \
+  -H 'X-API-Key: live_abc123' \
+  -H 'Content-Type: application/json' \
+  -d '{ "text": "la mesa = table" }'
+```
+
+`Authorization: Bearer live_abc123` works too.
+
+Set `API_KEYS` as a Cloudflare secret. It accepts a comma-separated list, so a
+key can be rotated by adding the new one, shipping the app update, then
+removing the old one.
+
+**Until `API_KEYS` is set, the API is open.** That is deliberate — deploying
+this cannot take a live app offline — but it means setting the secret is the
+actual cutover. `GET /` reports `auth.required` so the state is checkable
+rather than assumed.
+
+Unauthorized requests are rejected with a 401 before any parsing or upstream
+call, so they cost nothing.
+
+> A key shipped inside an app binary can be extracted, and is visible to anyone
+> proxying their own device. This stops scanners and opportunists, not a
+> determined attacker. Device attestation (App Attest) is the real answer;
+> this is the layer that closes the door today.
 
 ## Providers and cost
 
@@ -344,6 +375,7 @@ Secrets, set in the Cloudflare dashboard:
 | `CHEAPER_INFERENCE_API_KEY` | Text requests |
 | `OPENAI_API_KEY` | Document requests |
 | `DEBUG_TOKEN` | Optional. Unlocks `error.details`. |
+| `API_KEYS` | Comma-separated client keys. Unset = open. |
 
 Variables, in `wrangler.jsonc` or the dashboard:
 

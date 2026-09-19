@@ -8,6 +8,7 @@ import {
 } from "./lib/ai.js";
 import { DEFAULT_PROVIDER, DEFAULT_DOCUMENT_PROVIDER } from "./config.js";
 import { recordError, isDebugAuthorized } from "./lib/errorLog.js";
+import { isAuthorized, authRequired } from "./lib/auth.js";
 import { errorsPage, isErrorsPageAllowed } from "./routes/errorsPage.js";
 import { extractSource } from "./routes/extractSource.js";
 import { outlineSource } from "./routes/outlineSource.js";
@@ -85,6 +86,9 @@ export default {
         ok: true,
         service: "LearnAlert API",
         version: "1.1.0",
+        auth: {
+          required: authRequired(env)
+        },
         ai: {
           active: env.AI_PROVIDER || DEFAULT_PROVIDER,
           documents: env.DOCUMENT_PROVIDER || DEFAULT_DOCUMENT_PROVIDER,
@@ -103,6 +107,22 @@ export default {
           "POST /generate-quiz"
         ]
       });
+    }
+
+    // Every remaining route spends money upstream, so authorize before doing
+    // any parsing or provider work.
+    if (!isAuthorized(request, env)) {
+      recordError({
+        requestId,
+        code: "UNAUTHORIZED",
+        message: "Missing or invalid API key.",
+        status: 401,
+        details: { path: url.pathname, hadHeader: Boolean(request.headers.get("x-api-key")) },
+        method: request.method,
+        path: url.pathname
+      });
+
+      return apiError("UNAUTHORIZED", "Missing or invalid API key.", 401, requestId);
     }
 
     try {
