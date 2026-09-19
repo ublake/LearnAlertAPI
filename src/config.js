@@ -127,18 +127,43 @@ export function reasoningEffort(task, env = {}) {
 }
 
 /**
- * Token prices in USD per million tokens, for the call log's cost column.
+ * What a call cost, in USD.
  *
- * There are no defaults on purpose: a wrong number is worse than a blank,
- * because it looks authoritative. Set these to the rate card you are actually
- * billed at and the log starts costing calls; leave them unset and the cost
- * column reads "n/a".
+ * Two sources, in order of trust:
  *
- * Cached input is billed at a discount, so it is priced separately — that is
- * the whole reason the prompt-cache ordering matters.
+ * 1. What the provider reports. CheaperInference returns `usage.cost` on every
+ *    response, which is the amount actually billed. Its rates move, and a
+ *    reported figure tracks them for free — no rate card to keep in sync.
+ * 2. The rate card below. OpenAI reports no cost, so its calls are estimated
+ *    from published prices.
+ *
+ * The log records which of the two produced each number, because "exact" and
+ * "our arithmetic against a table we typed in" deserve different trust.
  */
-export function pricing(env = {}) {
-  const rate = (name) => {
+
+/**
+ * Published prices in USD per million tokens. Long-context requests are billed
+ * at a higher rate above a token threshold, so both tiers are kept.
+ *
+ * NOTE: the threshold is the same single-sourced 272k figure used for the
+ * upload budget and is still unverified against OpenAI's pricing page. Set
+ * PRICE_LONG_CONTEXT_THRESHOLD to correct it without a redeploy of this file.
+ */
+export const RATE_CARDS = {
+  // gpt-5.6-luna, from OpenAI's pricing page.
+  openai: {
+    shortContext: { input: 0.2, cachedInput: 0.02, output: 1.2 },
+    longContext: { input: 0.4, cachedInput: 0.04, output: 1.8 }
+  },
+  // Deliberately absent: CheaperInference reports real cost per request, so a
+  // card here would only ever be a stale second opinion.
+  cheaper_inference: null
+};
+
+export function pricing(env = {}, providerName = "openai") {
+  const card = RATE_CARDS[providerName] || null;
+
+  const override = (name) => {
     const raw = env[name];
 
     // An unset var and a var set to "" mean the same thing: no rate card.
@@ -152,39 +177,73 @@ export function pricing(env = {}) {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   };
 
+  const threshold =
+    override("PRICE_LONG_CONTEXT_THRESHOLD") ?? STANDARD_CONTEXT_INPUT_TOKENS;
+
+  // Env overrides win over the card, so a price change is a var edit rather
+  // than a code change. The unsuffixed names are the short-context tier,
+  // which is what almost every request hits.
+  const tier = (prefix, fallback) => ({
+    input: override(`PRICE_${prefix}INPUT_PER_MTOK`) ?? fallback?.input ?? null,
+    cachedInput:
+      override(`PRICE_${prefix}CACHED_INPUT_PER_MTOK`) ??
+      fallback?.cachedInput ??
+      null,
+    output:
+      override(`PRICE_${prefix}OUTPUT_PER_MTOK`) ?? fallback?.output ?? null
+  });
+
   return {
-    input: rate("PRICE_INPUT_PER_MTOK"),
-    cachedInput: rate("PRICE_CACHED_INPUT_PER_MTOK"),
-    output: rate("PRICE_OUTPUT_PER_MTOK")
+    provider: providerName,
+    longContextThreshold: threshold,
+    shortContext: tier("", card?.shortContext),
+    longContext: tier("LONG_", card?.longContext)
   };
 }
 
 /**
+ * Returns { usd, source } where source is "reported" (the provider told us),
+ * "estimated" (our arithmetic), or null (neither was possible).
+ *
  * Cached prompt tokens are included in prompt_tokens, so they are subtracted
  * out before the uncached rate is applied rather than billed twice.
  */
 export function estimateCostUsd(usage, prices) {
-  if (!usage || prices.input === null || prices.output === null) return null;
+  if (!usage) return { usd: null, source: null };
+
+  if (typeof usage.reportedCostUsd === "number") {
+    return { usd: Number(usage.reportedCostUsd.toFixed(6)), source: "reported" };
+  }
 
   const promptTokens = Number(usage.prompt_tokens) || 0;
   const cachedTokens = Number(usage.cachedTokens) || 0;
   const outputTokens = Number(usage.completion_tokens) || 0;
+
+  // Which tier applies is decided by the prompt size, the same quantity the
+  // provider bills against.
+  const tier =
+    promptTokens > prices.longContextThreshold
+      ? prices.longContext
+      : prices.shortContext;
+
+  if (!tier || tier.input === null || tier.output === null) {
+    return { usd: null, source: null };
+  }
 
   const billedCached = Math.min(cachedTokens, promptTokens);
   const billedFresh = promptTokens - billedCached;
 
   // An unset cached rate falls back to the full input rate, which overstates
   // rather than understates the bill.
-  const cachedRate =
-    prices.cachedInput === null ? prices.input : prices.cachedInput;
+  const cachedRate = tier.cachedInput === null ? tier.input : tier.cachedInput;
 
   const cost =
-    (billedFresh * prices.input +
+    (billedFresh * tier.input +
       billedCached * cachedRate +
-      outputTokens * prices.output) /
+      outputTokens * tier.output) /
     1_000_000;
 
-  return Number(cost.toFixed(6));
+  return { usd: Number(cost.toFixed(6)), source: "estimated" };
 }
 
 export function estimateFileTokens(byteSize) {

@@ -40,6 +40,7 @@ function fakeD1() {
                 tokens_cached: null,
                 tokens_out: null,
                 cost_usd: null,
+                cost_source: null,
                 http_status: null,
                 error_code: null
               });
@@ -59,6 +60,7 @@ function fakeD1() {
               tokens_cached,
               tokens_out,
               cost_usd,
+              cost_source,
               http_status,
               error_code,
               request_id
@@ -77,6 +79,7 @@ function fakeD1() {
                 tokens_cached,
                 tokens_out,
                 cost_usd,
+                cost_source,
                 http_status,
                 error_code
               });
@@ -112,7 +115,8 @@ function fakeD1() {
               0
             ),
             tokensOut: all.reduce((sum, r) => sum + (r.tokens_out || 0), 0),
-            costUsd: all.reduce((sum, r) => sum + (r.cost_usd || 0), 0)
+            costUsd: all.reduce((sum, r) => sum + (r.cost_usd || 0), 0),
+            estimated: all.filter((r) => r.cost_source === "estimated").length
           };
         }
       };
@@ -366,7 +370,11 @@ test("GET /logs renders the page and serves JSON", async () => {
     const body = await asJson.json();
 
     assert.equal(body.ok, true);
-    assert.equal(body.priced, false);
+    // The stub provider reports no cost and has no rate card, so nothing is
+    // priced — and the page must say so rather than invent a number.
+    assert.equal(body.calls[0].costUsd, null);
+    assert.equal(body.calls[0].costSource, null);
+    assert.equal(body.rateCard.longContextThreshold, 272_000);
     assert.equal(body.totals.calls, 1);
     assert.equal(body.calls[0].endpoint, "/v1/decks/generate");
     assert.equal(body.calls[0].tokensIn, 12_000);
@@ -447,44 +455,103 @@ test("relative time and duration read the way a log should", () => {
 });
 
 test("blank price vars read as unset, not as a rate of zero", () => {
-  // wrangler.jsonc ships these as "", which Number() turns into 0.
-  const blank = pricing({
-    PRICE_INPUT_PER_MTOK: "",
-    PRICE_CACHED_INPUT_PER_MTOK: "  ",
-    PRICE_OUTPUT_PER_MTOK: ""
-  });
+  // A provider with no rate card and no reported cost cannot be priced.
+  const none = pricing({}, "cheaper_inference");
 
-  assert.equal(blank.input, null);
-  assert.equal(blank.cachedInput, null);
-  assert.equal(blank.output, null);
-  assert.equal(
+  assert.equal(none.shortContext.input, null);
+  assert.deepEqual(
     estimateCostUsd(
       { prompt_tokens: 1_000_000, cachedTokens: 0, completion_tokens: 1000 },
-      blank
+      none
     ),
+    { usd: null, source: null }
+  );
+
+  // "" must not read as 0: Number("") is 0, not NaN.
+  assert.equal(
+    pricing({ PRICE_INPUT_PER_MTOK: "  " }, "cheaper_inference").shortContext
+      .input,
     null
   );
 
   // A deliberate zero is still a real rate.
   assert.equal(
-    pricing({ PRICE_INPUT_PER_MTOK: "0", PRICE_OUTPUT_PER_MTOK: "0" }).input,
+    pricing({ PRICE_INPUT_PER_MTOK: "0" }, "cheaper_inference").shortContext
+      .input,
     0
   );
 });
 
+test("a provider-reported cost beats the rate card", () => {
+  const prices = pricing({}, "cheaper_inference");
+
+  // CheaperInference reports real cost, so nothing is estimated.
+  assert.deepEqual(
+    estimateCostUsd(
+      { prompt_tokens: 50_000, completion_tokens: 900, reportedCostUsd: 0.0042 },
+      prices
+    ),
+    { usd: 0.0042, source: "reported" }
+  );
+
+  // Even where a card exists, the reported figure wins.
+  assert.deepEqual(
+    estimateCostUsd(
+      { prompt_tokens: 50_000, completion_tokens: 900, reportedCostUsd: 0.5 },
+      pricing({}, "openai")
+    ),
+    { usd: 0.5, source: "reported" }
+  );
+});
+
+test("the long-context tier applies above the threshold", () => {
+  const prices = pricing({}, "openai");
+
+  // 100k prompt: short tier. 100k @ $0.20 + 5k @ $1.20 per million.
+  assert.deepEqual(
+    estimateCostUsd(
+      { prompt_tokens: 100_000, cachedTokens: 0, completion_tokens: 5_000 },
+      prices
+    ),
+    { usd: 0.026, source: "estimated" }
+  );
+
+  // 300k prompt: long tier, double the rate.
+  assert.deepEqual(
+    estimateCostUsd(
+      { prompt_tokens: 300_000, cachedTokens: 0, completion_tokens: 5_000 },
+      prices
+    ),
+    { usd: 0.129, source: "estimated" }
+  );
+
+  // The threshold is tunable without a code change.
+  assert.equal(
+    estimateCostUsd(
+      { prompt_tokens: 100_000, cachedTokens: 0, completion_tokens: 5_000 },
+      pricing({ PRICE_LONG_CONTEXT_THRESHOLD: "50000" }, "openai")
+    ).usd,
+    0.049
+  );
+});
+
 test("cached tokens are billed at the cached rate, not twice", () => {
-  const prices = pricing({
-    PRICE_INPUT_PER_MTOK: "10",
-    PRICE_CACHED_INPUT_PER_MTOK: "1",
-    PRICE_OUTPUT_PER_MTOK: "30"
-  });
+  const prices = pricing(
+    {
+      PRICE_INPUT_PER_MTOK: "10",
+      PRICE_CACHED_INPUT_PER_MTOK: "1",
+      PRICE_OUTPUT_PER_MTOK: "30",
+      PRICE_LONG_CONTEXT_THRESHOLD: "99999999"
+    },
+    "cheaper_inference"
+  );
 
   // 1M prompt tokens, all cached, no output: the cached rate alone.
   assert.equal(
     estimateCostUsd(
       { prompt_tokens: 1_000_000, cachedTokens: 1_000_000, completion_tokens: 0 },
       prices
-    ),
+    ).usd,
     1
   );
 
@@ -493,7 +560,7 @@ test("cached tokens are billed at the cached rate, not twice", () => {
     estimateCostUsd(
       { prompt_tokens: 1_000_000, cachedTokens: 0, completion_tokens: 0 },
       prices
-    ),
+    ).usd,
     10
   );
 
@@ -501,8 +568,15 @@ test("cached tokens are billed at the cached rate, not twice", () => {
   assert.equal(
     estimateCostUsd(
       { prompt_tokens: 1_000_000, cachedTokens: 1_000_000, completion_tokens: 0 },
-      pricing({ PRICE_INPUT_PER_MTOK: "10", PRICE_OUTPUT_PER_MTOK: "30" })
-    ),
+      pricing(
+        {
+          PRICE_INPUT_PER_MTOK: "10",
+          PRICE_OUTPUT_PER_MTOK: "30",
+          PRICE_LONG_CONTEXT_THRESHOLD: "99999999"
+        },
+        "cheaper_inference"
+      )
+    ).usd,
     10
   );
 });

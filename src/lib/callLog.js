@@ -91,14 +91,17 @@ export async function finishCall(env, call, { status, httpStatus, errorCode }) {
   if (call.inserted) await call.inserted;
 
   const usage = call.usage;
-  const cost = estimateCostUsd(usage, pricing(env));
+
+  // Priced against the provider that actually answered, since their rate
+  // cards differ and only some report a real cost.
+  const cost = estimateCostUsd(usage, pricing(env, call.provider));
 
   try {
     await env.LOGS_DB.prepare(
       `UPDATE call_log SET
          finished_at = ?, status = ?, provider = ?, model = ?,
          source_type = ?, tokens_in = ?, tokens_cached = ?, tokens_out = ?,
-         cost_usd = ?, http_status = ?, error_code = ?
+         cost_usd = ?, cost_source = ?, http_status = ?, error_code = ?
        WHERE request_id = ?`
     )
       .bind(
@@ -110,7 +113,8 @@ export async function finishCall(env, call, { status, httpStatus, errorCode }) {
         usage ? Number(usage.prompt_tokens) || 0 : null,
         usage ? Number(usage.cachedTokens) || 0 : null,
         usage ? Number(usage.completion_tokens) || 0 : null,
-        cost,
+        cost.usd,
+        cost.source,
         httpStatus ?? null,
         errorCode ?? null,
         call.requestId
@@ -163,7 +167,8 @@ export async function summarize(env) {
        SUM(COALESCE(tokens_in, 0)) AS tokensIn,
        SUM(COALESCE(tokens_cached, 0)) AS tokensCached,
        SUM(COALESCE(tokens_out, 0)) AS tokensOut,
-       SUM(COALESCE(cost_usd, 0)) AS costUsd
+       SUM(COALESCE(cost_usd, 0)) AS costUsd,
+       SUM(CASE WHEN cost_source = 'estimated' THEN 1 ELSE 0 END) AS estimated
      FROM call_log`
   ).first();
 
@@ -175,7 +180,8 @@ export async function summarize(env) {
     tokensIn: row?.tokensIn || 0,
     tokensCached: row?.tokensCached || 0,
     tokensOut: row?.tokensOut || 0,
-    costUsd: row?.costUsd || 0
+    costUsd: row?.costUsd || 0,
+    estimated: row?.estimated || 0
   };
 }
 
@@ -194,6 +200,7 @@ function toEntry(row) {
     tokensCached: row.tokens_cached,
     tokensOut: row.tokens_out,
     costUsd: row.cost_usd,
+    costSource: row.cost_source,
     httpStatus: row.http_status,
     errorCode: row.error_code,
     durationMs:

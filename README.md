@@ -315,107 +315,41 @@ logged to the console and the deck still goes out.
 
 ### Costs
 
-The cost column reads `n/a` until you set your rate card, in USD per million
-tokens:
+Two sources, and the log says which produced each figure.
 
-| Var | Meaning |
-| --- | --- |
-| `PRICE_INPUT_PER_MTOK` | Uncached input tokens |
-| `PRICE_CACHED_INPUT_PER_MTOK` | Cached input tokens, usually far cheaper |
-| `PRICE_OUTPUT_PER_MTOK` | Output tokens |
+**Reported.** CheaperInference returns `usage.cost` on every response — the
+amount actually billed. That is used as-is. Their rates move; a reported figure
+follows them with no rate card to maintain.
 
-No rates are assumed, because a guessed number looks authoritative. Cached
-tokens are subtracted from the prompt total before the uncached rate applies,
-rather than billed twice. If the cached rate is unset, cached tokens fall back
-to the full input rate, which overstates rather than understates the bill.
+**Estimated.** OpenAI reports no cost, so those calls are priced from the card
+in [src/config.js](src/config.js), and the row gets an `est` badge. Published
+`gpt-5.6-luna` rates, USD per million tokens:
 
-Figures are an estimate from the usage each provider reports, not a bill.
-
-## Authentication
-
-Every endpoint that costs money requires an API key once one is configured:
-
-```bash
-curl -X POST https://api.learnalertapp.com/v1/decks/generate \
-  -H 'X-API-Key: live_abc123' \
-  -H 'Content-Type: application/json' \
-  -d '{ "text": "la mesa = table" }'
-```
-
-`Authorization: Bearer live_abc123` works too.
-
-Set `API_KEYS` as a Cloudflare secret. It accepts a comma-separated list, so a
-key can be rotated by adding the new one, shipping the app update, then
-removing the old one.
-
-**Until `API_KEYS` is set, the API is open.** That is deliberate — deploying
-this cannot take a live app offline — but it means setting the secret is the
-actual cutover. `GET /` reports `auth.required` so the state is checkable
-rather than assumed.
-
-Unauthorized requests are rejected with a 401 before any parsing or upstream
-call, so they cost nothing.
-
-> A key shipped inside an app binary can be extracted, and is visible to anyone
-> proxying their own device. This stops scanners and opportunists, not a
-> determined attacker. Device attestation (App Attest) is the real answer;
-> this is the layer that closes the door today.
-
-## Providers and cost
-
-Two upstream providers, chosen per request by content type:
-
-| Request | Provider | Setting | Why |
+| Tier | Input | Cached input | Output |
 | --- | --- | --- | --- |
-| Text | Cheaper Inference | `AI_PROVIDER` | Identical work, ~60% cheaper |
-| Carries a file | OpenAI | `DOCUMENT_PROVIDER` | Must parse the document |
+| Short context | $0.20 | $0.02 | $1.20 |
+| Long context | $0.40 | $0.04 | $1.80 |
 
-Both speak the same chat-completions dialect, so switching is only a change of
-host and key. Both serve `gpt-5.6-luna` (~1.05M context, 128k output).
+The long-context tier applies above `PRICE_LONG_CONTEXT_THRESHOLD` prompt
+tokens, defaulting to the same 272k figure the upload budget uses — which is
+single-sourced and unverified. Correct it with that var if it is wrong.
 
-Documents go to a provider that parses them because an inlined file that nobody
-decodes is billed as raw text — roughly 400k tokens for a PDF versus 110k
-parsed. A discount does not cover a 4x token penalty.
+Override any rate without touching code:
 
-Every response reports what served it in `meta.provider`, `meta.model` and
-`meta.usage` (including `cachedTokens`).
-
-### Configuration
-
-Secrets, set in the Cloudflare dashboard:
-
-| Secret | For |
+| Var | Tier |
 | --- | --- |
-| `CHEAPER_INFERENCE_API_KEY` | Text requests |
-| `OPENAI_API_KEY` | Document requests |
-| `DEBUG_TOKEN` | Unlocks `error.details` **and** `GET /logs`. |
-| `API_KEYS` | Comma-separated client keys. Unset = open. |
+| `PRICE_INPUT_PER_MTOK` | Short context input |
+| `PRICE_CACHED_INPUT_PER_MTOK` | Short context cached input |
+| `PRICE_OUTPUT_PER_MTOK` | Short context output |
+| `PRICE_LONG_INPUT_PER_MTOK` | Long context input |
+| `PRICE_LONG_CACHED_INPUT_PER_MTOK` | Long context cached input |
+| `PRICE_LONG_OUTPUT_PER_MTOK` | Long context output |
+| `PRICE_LONG_CONTEXT_THRESHOLD` | Prompt tokens at which the long tier starts |
 
-Variables, in `wrangler.jsonc` or the dashboard:
-
-| Variable | Default | Does |
-| --- | --- | --- |
-| `AI_PROVIDER` | `cheaper_inference` | Provider for text |
-| `DOCUMENT_PROVIDER` | `openai` | Provider for files |
-| `AI_MODEL` | — | Override the model |
-| `ALLOW_PROVIDER_OVERRIDE` | `false` | Honour an `X-AI-Provider` header |
-| `ERROR_LOG_ENABLED` | `false` | Serve `GET /errors` (off) |
-| `REASONING_GENERATION` | `low` | Also `_REFINE`, `_OUTLINE` |
-| `PRICE_INPUT_PER_MTOK` | — | USD per 1M input tokens, for `/logs` |
-| `PRICE_CACHED_INPUT_PER_MTOK` | — | USD per 1M cached input tokens |
-| `PRICE_OUTPUT_PER_MTOK` | — | USD per 1M output tokens |
-
-Bindings, in `wrangler.jsonc`:
-
-| Binding | For |
-| --- | --- |
-| `LOGS_DB` | D1 database behind `GET /logs`. Unbound = `/logs` is 503. |
-
-There is no key fallback between providers: whichever is selected must have its
-own secret, or the request fails with a 500 naming the missing variable before
-anything is sent. `GET /` shows which are configured.
-
----
+Cached tokens are subtracted from the prompt total before the uncached rate
+applies, rather than billed twice. An unset cached rate falls back to the full
+input rate, overstating rather than understating. A blank var reads as unset,
+not as a rate of zero.
 
 ## Notes for the iOS app
 

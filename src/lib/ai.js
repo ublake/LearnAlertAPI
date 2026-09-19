@@ -143,6 +143,27 @@ export function textContentItem(text) {
   };
 }
 
+/**
+ * Providers that bill per request can say what a call cost. CheaperInference
+ * puts it in `usage.cost` and again under its own billing block; OpenAI sends
+ * nothing, which is why the rate card in config.js still exists.
+ */
+function reportedCost(data, usage) {
+  const candidates = [
+    usage?.cost,
+    usage?.cost_details?.upstream_inference_cost,
+    data?.cheaper_inference?.billing?.billed_cost_usd
+  ];
+
+  for (const value of candidates) {
+    const parsed = Number(value);
+
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+
+  return null;
+}
+
 export async function callStructuredOutput({
   env,
   provider,
@@ -263,7 +284,11 @@ export async function callStructuredOutput({
       cachedFraction:
         cachedTokens !== null && usage.prompt_tokens
           ? Number((cachedTokens / usage.prompt_tokens).toFixed(3))
-          : null
+          : null,
+      // What the provider says this call actually cost. CheaperInference
+      // reports it; OpenAI does not. A reported figure beats any rate card we
+      // could keep in sync, so it wins when present.
+      reportedCostUsd: reportedCost(data, usage)
     },
     model: data.model || target.model,
     provider: target.name

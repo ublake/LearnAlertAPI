@@ -45,13 +45,27 @@ function formatTokens(value) {
   return Number(value).toLocaleString();
 }
 
-function formatCost(value, prices) {
-  if (prices.input === null || prices.output === null) return "n/a";
-  if (value === null || value === undefined) return "—";
+function formatCost(value) {
+  if (value === null || value === undefined) return "n/a";
   if (value === 0) return "$0";
 
   // Sub-cent calls are the common case, so two decimals would read as $0.00.
   return value < 0.01 ? `$${value.toFixed(5)}` : `$${value.toFixed(3)}`;
+}
+
+/**
+ * A reported cost is what the provider billed; an estimated one is our
+ * arithmetic. Marking the estimates keeps the difference visible without
+ * shouting about the exact ones.
+ */
+function costCell(entry) {
+  const amount = escapeHtml(formatCost(entry.costUsd));
+
+  if (entry.costSource === "estimated") {
+    return `${amount} <span class="est" title="Estimated from the rate card; this provider does not report cost">est</span>`;
+  }
+
+  return amount;
 }
 
 function statusLabel(status) {
@@ -60,7 +74,7 @@ function statusLabel(status) {
   return status;
 }
 
-function renderRow(entry, now, prices) {
+function renderRow(entry, now) {
   const cached =
     entry.tokensCached > 0
       ? ` <span class="cached">${formatTokens(entry.tokensCached)} cached</span>`
@@ -80,14 +94,14 @@ function renderRow(entry, now, prices) {
       <td class="num">${formatTokens(entry.tokensIn)}${cached}</td>
       <td class="num">${formatTokens(entry.tokensOut)}</td>
       <td class="num">${escapeHtml(formatDuration(entry.durationMs))}</td>
-      <td class="num">${escapeHtml(formatCost(entry.costUsd, prices))}</td>
+      <td class="num">${costCell(entry)}</td>
       <td class="mono dim">${
         entry.errorCode ? escapeHtml(entry.errorCode) : ""
       }</td>
     </tr>`;
 }
 
-function renderSummary(totals, prices) {
+function renderSummary(totals) {
   if (!totals) return "";
 
   return `
@@ -99,7 +113,11 @@ function renderSummary(totals, prices) {
       <span><strong>${formatTokens(totals.tokensIn)}</strong> in</span>
       <span><strong>${formatTokens(totals.tokensCached)}</strong> cached</span>
       <span><strong>${formatTokens(totals.tokensOut)}</strong> out</span>
-      <span><strong>${formatCost(totals.costUsd, prices)}</strong> total</span>
+      <span><strong>${formatCost(totals.costUsd)}</strong> total${
+        totals.estimated > 0
+          ? ` <span class="est">${totals.estimated} est</span>`
+          : ""
+      }</span>
     </div>`;
 }
 
@@ -143,6 +161,11 @@ const STYLES = `
   .dim { color: var(--dim); }
   .when { color: var(--dim); white-space: nowrap; }
   .cached { color: var(--dim); font-size: 11px; display: block; }
+  .est {
+    color: var(--dim); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .04em; border: 1px solid var(--line); border-radius: 3px;
+    padding: 0 3px; cursor: help;
+  }
   .pill {
     display: inline-block; padding: 1px 8px; border-radius: 999px;
     font-size: 11px; font-weight: 600; white-space: nowrap;
@@ -163,22 +186,21 @@ const STYLES = `
 `;
 
 function renderPage({ entries, totals, prices, now, refreshSeconds, jsonHref }) {
-  const rows = entries.map((entry) => renderRow(entry, now, prices)).join("");
+  const rows = entries.map((entry) => renderRow(entry, now)).join("");
 
-  const priceNote =
-    prices.input === null || prices.output === null
-      ? `<p class="note">Costs read <code>n/a</code> until
-         <code>PRICE_INPUT_PER_MTOK</code>,
-         <code>PRICE_CACHED_INPUT_PER_MTOK</code> and
-         <code>PRICE_OUTPUT_PER_MTOK</code> are set to your rate card, in USD
-         per million tokens. No rates are assumed, because a wrong number
-         looks authoritative.</p>`
-      : `<p class="note">Costs are computed from your configured rates:
-         <code>$${prices.input}</code> per million input tokens,
-         <code>$${
-           prices.cachedInput === null ? prices.input : prices.cachedInput
-         }</code> cached, <code>$${prices.output}</code> output. They are an
-         estimate from reported usage, not a bill.</p>`;
+  const card = prices.shortContext;
+
+  const priceNote = `<p class="note">
+    Costs without a badge are what the provider reported billing — exact, and
+    they follow rate changes on their own. A <span class="est">est</span> badge
+    means the provider reports no cost, so the figure is our arithmetic against
+    the rate card: <code>$${card.input ?? "—"}</code> per million input tokens,
+    <code>$${card.cachedInput ?? card.input ?? "—"}</code> cached,
+    <code>$${card.output ?? "—"}</code> output, switching to the long-context
+    tier above ${prices.longContextThreshold.toLocaleString()} prompt tokens.
+    Override any of them with <code>PRICE_INPUT_PER_MTOK</code> and friends
+    (<code>PRICE_LONG_*</code> for the upper tier).
+  </p>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -197,7 +219,7 @@ function renderPage({ entries, totals, prices, now, refreshSeconds, jsonHref }) 
       kept ${CALL_LOG_RETENTION_DAYS} days ·
       <a href="${escapeHtml(jsonHref)}">JSON</a>
     </p>
-    ${renderSummary(totals, prices)}
+    ${renderSummary(totals)}
     ${
       entries.length === 0
         ? `<p class="empty">No calls logged yet.</p>`
@@ -249,7 +271,7 @@ export async function logsPage(request, env) {
       ok: true,
       now: new Date(now).toISOString(),
       retentionDays: CALL_LOG_RETENTION_DAYS,
-      priced: prices.input !== null && prices.output !== null,
+      rateCard: prices,
       totals,
       calls: entries.map((entry) => ({
         ...entry,

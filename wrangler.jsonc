@@ -27,11 +27,13 @@
 		// isolate's memory. Use X-Debug-Token for error details, or the
 		// Cloudflare dashboard logs. Set to "true" to re-enable.
 		"ERROR_LOG_ENABLED": "false",
-		// Token prices in USD per million tokens, for the /logs cost column.
-		// Left empty on purpose: costs read "n/a" rather than showing a number
-		// that was guessed. Fill in the rate card you are billed at.
+		// Cost on /logs comes from the provider when it reports one
+		// (CheaperInference does), and otherwise from the rate card in
+		// config.js. These override the card; blank means "use the card".
+		// See the Costs section of the README for every tier.
 		"PRICE_INPUT_PER_MTOK": "",
 		"PRICE_CACHED_INPUT_PER_MTOK": "",
-		"PRICE_OUTPUT_PER_MTOK": ""
+		"PRICE_OUTPUT_PER_MTOK": "",
+		"PRICE_LONG_CONTEXT_THRESHOLD": ""
 	}
 }
