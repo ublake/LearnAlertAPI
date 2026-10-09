@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import worker from "../src/index.js";
+import worker from "../test-support/worker-fixture.js";
 import { OUTLINE } from "../src/config.js";
 
 const ENV = { CHEAPER_INFERENCE_API_KEY: "ci_live_test", OPENAI_API_KEY: "sk" };

@@ -29,7 +29,7 @@ export function configuredKeys(env) {
 }
 
 export function authRequired(env) {
-  return configuredKeys(env).length > 0;
+  return configuredKeys(env).length > 0 || env.ALLOW_UNAUTHENTICATED_AI !== "true";
 }
 
 function presentedKey(request) {
@@ -43,13 +43,12 @@ function presentedKey(request) {
 }
 
 /**
- * Open until a key is configured, so deploying this cannot take a live app
- * offline. Setting API_KEYS is the cutover, and GET / reports which state the
- * Worker is in so "I thought it was protected" is checkable.
+ * Production fails closed without a key. Local development may explicitly
+ * set ALLOW_UNAUTHENTICATED_AI=true; never set it in production.
  */
 export function isAuthorized(request, env) {
   const keys = configuredKeys(env);
-  if (keys.length === 0) return true;
+  if (keys.length === 0) return env.ALLOW_UNAUTHENTICATED_AI === "true";
 
   const supplied = presentedKey(request);
   if (!supplied) return false;

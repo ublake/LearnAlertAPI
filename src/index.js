@@ -22,6 +22,8 @@ import { outlineSource } from "./routes/outlineSource.js";
 import { generateDeck } from "./routes/generateDeck.js";
 import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
+import { limitAIRequest, pruneAILimits } from "./lib/aiLimits.js";
+import { community, cleanupCommunity } from "./routes/community.js";
 
 function classify(error) {
   if (error instanceof ValidationError) {
@@ -84,12 +86,22 @@ function routeFor(method, pathname) {
 }
 
 export default {
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(cleanupCommunity(env));
+    ctx.waitUntil(pruneAILimits(env));
+  },
   async fetch(request, env, ctx) {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
       return optionsResponse();
+    }
+
+    // Community routes use individual Apple-verified sessions for writes.
+    // Browsing published decks is public and does not require the AI API key.
+    if (url.pathname.startsWith('/v1/community/')) {
+      return community(request, env, requestId);
     }
 
     if (request.method === "GET" && url.pathname === "/errors") {
@@ -115,6 +127,10 @@ export default {
         version: "1.1.0",
         auth: {
           required: authRequired(env)
+        },
+        community: {
+          databaseConfigured: Boolean(env.COMMUNITY_DB),
+          mediaConfigured: Boolean(env.DECK_ASSETS)
         },
         ai: {
           active: env.AI_PROVIDER || DEFAULT_PROVIDER,
@@ -161,6 +177,9 @@ export default {
         requestId
       );
     }
+
+    const limited = await limitAIRequest(request, env, requestId);
+    if (limited) return limited;
 
     // The row opens before the upstream call so an in-flight generation shows
     // up while it runs, not three minutes later when it settles.

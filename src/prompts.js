@@ -91,9 +91,9 @@ SOURCE GROUNDING
 OUTPUT
 - action must be either "chat" or "deck" and must agree with whether deck is null.
 - For action "deck", assistantMessage should:
-  * Clearly break down what was received (e.g. total concepts/terms identified, main modules found, and card count).
-  * Proactively recommend which module or foundational topics the user should start studying first.
-  * Welcome questions about the study material or refinements to the cards in THIS deck.
+  * Use ONE short sentence summarizing the card count and main focus. Use a second short sentence only if needed to mention an important limitation.
+  * Keep the entire message to at most 40 words and 280 characters, with no lists, headings, detailed breakdowns, study recommendations, or invitations for follow-up questions.
+  * Example: "I've created 15 flashcards covering Chapter 3 key terms, formulas, and definitions."
   * Never offer, suggest, or hint at creating another deck, a second deck, a follow-up deck, or a separate deck for leftover or remaining material. This includes phrasings such as "you can ask me to create another deck", "I can make a deck for the rest", or "we could split this into decks".
   * If material was left out, say so plainly in one clause, with no offer to cover it in another deck.
 - For action "chat", assistantMessage should be a concise, natural response that guides the user toward supplying study material when appropriate.

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import worker from "../src/index.js";
+import worker from "../test-support/worker-fixture.js";
 import { generateDeck } from "../src/routes/generateDeck.js";
 import { resolveProvider } from "../src/lib/ai.js";
 
@@ -52,6 +52,7 @@ test("defaults to Cheaper Inference", () => {
   assert.equal(provider.name, "cheaper_inference");
   assert.equal(provider.baseUrl, "https://api.cheaperinference.com/v1");
   assert.equal(provider.apiKey, "ci_live");
+  assert.equal(provider.model, "gpt-6-luna");
 });
 
 test("AI_PROVIDER switches the whole call to OpenAI", async () => {
@@ -72,6 +73,7 @@ test("AI_PROVIDER switches the whole call to OpenAI", async () => {
 
     assert.equal(calls.url, "https://api.openai.com/v1/chat/completions");
     assert.equal(calls.headers.Authorization, "Bearer sk-test");
+    assert.equal(calls.body.model, "gpt-6-luna");
     assert.equal(body.meta.provider, "openai");
   } finally {
     globalThis.fetch = originalFetch;

@@ -3,8 +3,9 @@
 Turns study material — a PDF, a photo of a page, or pasted notes — into a deck
 of flashcards, then lets the user chat with it to refine them.
 
-Cloudflare Worker. No database, no sessions: every request carries everything
-it needs.
+Cloudflare Worker with D1-backed request logs, AI quotas, and community deck
+metadata, plus private R2 media storage. AI requests carry their source context;
+community writes use Apple-verified sessions.
 
 ---
 
@@ -107,7 +108,7 @@ get `deck`. **Branch on `action`** — never assume a deck came back.
   "success": true,
   "requestId": "uuid",
   "action": "deck",
-  "assistantMessage": "Created 50 cards covering...",
+  "assistantMessage": "Created 50 cards covering Spanish pronouns and present-tense ser.",
   "deck": {
     "title": "Spanish Lesson 3",
     "subject": "Spanish",
@@ -117,9 +118,13 @@ get `deck`. **Branch on `action`** — never assume a deck came back.
     "cards": [ ... ]
   },
   "droppedCards": [],
-  "meta": { "provider": "openai", "model": "gpt-5.6-luna", "usage": { ... } }
+  "meta": { "provider": "openai", "model": "gpt-6-luna", "usage": { ... } }
 }
 ```
+
+For generated decks, `assistantMessage` is one short sentence summarizing the card
+count and focus, with a second sentence only when needed for an important limitation.
+The API caps it at two sentences, 40 words, and 280 characters.
 
 `droppedCards` lists cards that failed validation and were skipped — the rest of
 the deck is still good.
@@ -309,9 +314,8 @@ It sits in front of the API-key check so a browser can reach it, and traffic
 volume and spend are not public information. It carries no prompts, deck
 content, or source text — only metadata about each call.
 
-Until `database_id` is filled in, `/logs` answers 503 and the rest of the API
-runs exactly as before. Logging is never on the critical path: a D1 failure is
-logged to the console and the deck still goes out.
+Operational log writes are best-effort. AI quota reservations are mandatory:
+missing D1 limit storage or a reservation failure returns 503 before paid work.
 
 ### Costs
 
@@ -323,16 +327,17 @@ follows them with no rate card to maintain.
 
 **Estimated.** OpenAI reports no cost, so those calls are priced from the card
 in [src/config.js](src/config.js), and the row gets an `est` badge. Published
-`gpt-5.6-luna` rates, USD per million tokens:
+`gpt-6-luna` rates, USD per million tokens:
 
 | Tier | Input | Cached input | Output |
 | --- | --- | --- | --- |
-| Short context | $0.20 | $0.02 | $1.20 |
-| Long context | $0.40 | $0.04 | $1.80 |
+| Short context | $0.10 | $0.01 | $0.50 |
+| Long context | $0.20 | $0.02 | $0.75 |
 
 The long-context tier applies above `PRICE_LONG_CONTEXT_THRESHOLD` prompt
-tokens, defaulting to the same 272k figure the upload budget uses — which is
-single-sourced and unverified. Correct it with that var if it is wrong.
+tokens, defaulting to the published 272k threshold the upload budget uses.
+See [OpenAI's GPT-6 Luna model page](https://developers.openai.com/api/docs/models/gpt-6-luna).
+Override the threshold with that var if your pricing differs.
 
 Override any rate without touching code:
 
@@ -353,6 +358,9 @@ not as a rate of zero.
 
 ## Notes for the iOS app
 
+Public deck publishing, image/audio storage, authentication, and deployment are
+documented in [COMMUNITY.md](COMMUNITY.md).
+
 - Send `instruction` as the user's typed message only. Context goes in
   `chatHistory`, `sourceText` or `deck`.
 - Only append a message to `chatHistory` **after** a request succeeds.
@@ -361,3 +369,18 @@ not as a rate of zero.
   two hundred, because a 200-page document cannot fit in 200 cards.
 - `deck.title` is regenerated on every refine. If users can rename a deck,
   store the name locally and stop overwriting it.
+
+## AI request limits
+
+Apply `migrations/0003_ai_limits.sql` to `learnalert-logs` before deploying this version.
+All AI routes (including legacy quiz generation) require a configured API key and reserve
+D1 quota before contacting a provider. Defaults: 10 requests/IP/hour, 50/IP/day,
+and 200 requests globally/day. Configure `AI_REQUESTS_PER_IP_HOUR`,
+`AI_REQUESTS_PER_IP_DAY`, and `AI_REQUESTS_PER_DAY` as positive integers.
+Limits count attempts, including invalid/failed requests, and return 429 with Retry-After.
+Only hashed IP identifiers are stored; expired quota rows are pruned daily.
+Missing quota storage/schema returns 503. A shared app key can still be extracted;
+these quotas bound request volume while device attestation remains future work.
+For isolated local development only, `ALLOW_UNAUTHENTICATED_AI=true` and
+`AI_LIMITS_DISABLED=true` explicitly bypass their respective checks. Do not set
+these flags on a production Worker.

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import worker from "../src/index.js";
+import worker from "../test-support/worker-fixture.js";
 import { MAX_EXTRACT_BYTES } from "../src/config.js";
 
 const ENABLED = {

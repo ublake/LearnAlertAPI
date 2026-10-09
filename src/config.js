@@ -1,4 +1,4 @@
-export const MODEL = "gpt-5.6-luna";
+export const MODEL = "gpt-6-luna";
 
 /**
  * Both providers speak the same chat-completions dialect, so switching is a
@@ -40,7 +40,7 @@ export const DEFAULT_DOCUMENT_PROVIDER = "openai";
  * one token costs about three source bytes. A 20 MB upload would be ~7M
  * tokens: 17x over the window. These numbers keep a request inside it.
  */
-// Documented capacity for gpt-5.6-luna: ~1.05M total, 922k in, 128k out.
+// Documented capacity for gpt-6-luna: ~1.05M total, 922k in, 128k out.
 export const CONTEXT_WINDOW_TOKENS = 1_050_000;
 export const MAX_INPUT_TOKENS = 922_000;
 export const MAX_OUTPUT_TOKENS = 128_000;
@@ -52,8 +52,8 @@ export const BYTES_PER_TOKEN = 3;
  * billed at a premium above a threshold, so the default budget targets that
  * cliff rather than the ceiling.
  *
- * NOTE: the 272k figure is single-sourced and unverified against OpenAI's
- * pricing page. It is used as a soft budget, never as a hard capacity claim.
+ * GPT-6 Luna's published long-context pricing starts above 272k input tokens.
+ * This is a soft budget, never a hard capacity limit.
  */
 export const STANDARD_CONTEXT_INPUT_TOKENS = 272_000;
 
@@ -145,15 +145,14 @@ export function reasoningEffort(task, env = {}) {
  * Published prices in USD per million tokens. Long-context requests are billed
  * at a higher rate above a token threshold, so both tiers are kept.
  *
- * NOTE: the threshold is the same single-sourced 272k figure used for the
- * upload budget and is still unverified against OpenAI's pricing page. Set
- * PRICE_LONG_CONTEXT_THRESHOLD to correct it without a redeploy of this file.
+ * The threshold is the published 272k figure used for the upload budget. Set
+ * PRICE_LONG_CONTEXT_THRESHOLD to override it without a redeploy of this file.
  */
 export const RATE_CARDS = {
-  // gpt-5.6-luna, from OpenAI's pricing page.
+  // gpt-6-luna, from https://developers.openai.com/api/docs/models/gpt-6-luna.
   openai: {
-    shortContext: { input: 0.2, cachedInput: 0.02, output: 1.2 },
-    longContext: { input: 0.4, cachedInput: 0.04, output: 1.8 }
+    shortContext: { input: 0.1, cachedInput: 0.01, output: 0.5 },
+    longContext: { input: 0.2, cachedInput: 0.02, output: 0.75 }
   },
   // Deliberately absent: CheaperInference reports real cost per request, so a
   // card here would only ever be a stale second opinion.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker from "../test-support/worker-fixture.js";
 import { relativeTime, formatDuration } from "../src/lib/callLog.js";
 import { estimateCostUsd, pricing } from "../src/config.js";
 
@@ -512,22 +512,22 @@ test("a provider-reported cost beats the rate card", () => {
 test("the long-context tier applies above the threshold", () => {
   const prices = pricing({}, "openai");
 
-  // 100k prompt: short tier. 100k @ $0.20 + 5k @ $1.20 per million.
+  // 100k prompt: short tier. 100k @ $0.10 + 5k @ $0.50 per million.
   assert.deepEqual(
     estimateCostUsd(
       { prompt_tokens: 100_000, cachedTokens: 0, completion_tokens: 5_000 },
       prices
     ),
-    { usd: 0.026, source: "estimated" }
+    { usd: 0.0125, source: "estimated" }
   );
 
-  // 300k prompt: long tier, double the rate.
+  // 300k prompt: long tier, 2x input and 1.5x output rates.
   assert.deepEqual(
     estimateCostUsd(
       { prompt_tokens: 300_000, cachedTokens: 0, completion_tokens: 5_000 },
       prices
     ),
-    { usd: 0.129, source: "estimated" }
+    { usd: 0.06375, source: "estimated" }
   );
 
   // The threshold is tunable without a code change.
@@ -536,7 +536,7 @@ test("the long-context tier applies above the threshold", () => {
       { prompt_tokens: 100_000, cachedTokens: 0, completion_tokens: 5_000 },
       pricing({ PRICE_LONG_CONTEXT_THRESHOLD: "50000" }, "openai")
     ).usd,
-    0.049
+    0.02375
   );
 });
 

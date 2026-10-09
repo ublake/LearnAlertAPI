@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import worker from "../src/index.js";
+import worker from "../test-support/worker-fixture.js";
 
 const OPEN = { CHEAPER_INFERENCE_API_KEY: "ci", OPENAI_API_KEY: "sk" };
 const LOCKED = { ...OPEN, API_KEYS: "live_abc123" };
@@ -43,16 +43,14 @@ function stubUpstream() {
   return () => called;
 }
 
-test("no key configured leaves the endpoint open, so deploying cannot break a live app", async () => {
+test("production without a configured key fails closed without contacting upstream", async () => {
   const originalFetch = globalThis.fetch;
-  stubUpstream();
-
+  const wasCalled = stubUpstream();
   try {
-    const response = await worker.fetch(generate(), OPEN);
-    assert.equal(response.status, 200);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    const response = await worker.fetch(generate(), { ...OPEN, ALLOW_UNAUTHENTICATED_AI: 'false' });
+    assert.equal(response.status, 401);
+    assert.equal(wasCalled(), false);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("once a key is configured, an unauthenticated request is rejected free", async () => {

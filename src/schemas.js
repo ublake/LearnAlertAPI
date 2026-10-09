@@ -150,7 +150,8 @@ export const GENERATION_RESULT_SCHEMA = {
       enum: ["chat", "deck"]
     },
     assistantMessage: {
-      type: "string"
+      type: "string",
+      description: "For action deck: one short sentence about the card count and main focus; a second only for an important limitation. At most 40 words and 280 characters total. For action chat: a concise, natural response."
     },
     deck: {
       anyOf: [

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeGenerationResult } from "../src/lib/deck.js";
+import { normalizeGeneratedDeck, normalizeGenerationResult } from "../src/lib/deck.js";
 import { generateDeck } from "../src/routes/generateDeck.js";
 import { GENERATION_RESULT_SCHEMA } from "../src/schemas.js";
 
@@ -135,6 +135,35 @@ test("rejects a deck response without a deck", () => {
       }),
     /no deck for a deck response/
   );
+});
+
+test("generated deck summaries stay brief without clipping sentences", () => {
+  const summary = "I've created 1 flashcard covering cell biology.";
+  const limitation = "Some advanced topics were omitted.";
+  const deck = {
+    cards: [{ type: "tap_reveal", prompt: "What produces ATP?", answer: "Mitochondria" }]
+  };
+  const normalize = (assistantMessage) => normalizeGenerationResult({
+    action: "deck", assistantMessage, deck
+  }).assistantMessage;
+
+  assert.equal(normalize(summary), summary);
+  assert.equal(normalize(`${summary}\n\n${limitation}`), `${summary} ${limitation}`);
+  assert.equal(
+    normalize(`${summary} ${limitation} Start with foundations and ask me any questions.`),
+    `${summary} ${limitation}`
+  );
+  const longSentence = `I've created cards covering ${"all the detailed concepts and definitions ".repeat(10)}from your source.`;
+  assert.equal(normalize(`${summary} ${longSentence}`), summary);
+  assert.equal(normalize(longSentence), "Created 1 study card.");
+  assert.equal(normalize("x".repeat(300)), "Created 1 study card.");
+  assert.equal(normalize("   "), "Created 1 study card.");
+
+  // The limit applies only to deck generation; tutoring and refinements retain detail.
+  assert.equal(normalizeGenerationResult({
+    action: "chat", assistantMessage: longSentence, deck: null
+  }).assistantMessage, longSentence);
+  assert.equal(normalizeGeneratedDeck({ assistantMessage: longSentence, deck }).assistantMessage, longSentence);
 });
 
 test("generate endpoint returns the AI-selected chat action", async () => {

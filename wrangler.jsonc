@@ -1,39 +1,56 @@
 {
-  "name": "learnalert-api",
-  "main": "src/index.js",
-  "compatibility_date": "2026-09-04",
-  "observability": {
-    "enabled": true
-  },
-  // Backs GET /logs. Create it once with:
-  //   npx wrangler d1 create learnalert-logs
-  // paste the printed database_id below, then apply the schema with:
-  //   npx wrangler d1 execute learnalert-logs --remote --file=./migrations/0001_call_log.sql
-  // Until database_id is filled in, /logs answers 503 and the API runs
-  // exactly as before — logging is never on the critical path.
-  "d1_databases": [
-    {
-      "binding": "LOGS_DB",
-      "database_name": "learnalert-logs",
-      "database_id": "f4ae21eb-6cab-442c-86ab-f433271e35ac"
-    }
-  ],
-  "vars": {
-    // The switcher: "cheaper_inference" or "openai".
-    "AI_PROVIDER": "cheaper_inference",
-    // Set to "true" to let a request pick the provider via X-AI-Provider.
-    "ALLOW_PROVIDER_OVERRIDE": "false",
-    // Which provider parses uploaded documents. AI_PROVIDER overrides this.
-    "DOCUMENT_PROVIDER": "openai",
-    // GET /errors is off. It was a testing aid, and it only ever saw one
-    // isolate's memory. Use X-Debug-Token for error details, or the
-    // Cloudflare dashboard logs. Set to "true" to re-enable.
-    "ERROR_LOG_ENABLED": "false",
-    // Token prices in USD per million tokens, for the /logs cost column.
-    // Left empty on purpose: costs read "n/a" rather than showing a number
-    // that was guessed. Fill in the rate card you are billed at.
-    "PRICE_INPUT_PER_MTOK": "",
-    "PRICE_CACHED_INPUT_PER_MTOK": "",
-    "PRICE_OUTPUT_PER_MTOK": ""
-  }
+	"name": "learnalertapi",
+	"routes": [{ "pattern": "api.learnalertapp.com", "custom_domain": true }],
+	"main": "src/index.js",
+	"compatibility_date": "2026-09-04",
+	"observability": {
+		"enabled": true
+	},
+	// Backs GET /logs. Create it once with:
+	//   npx wrangler d1 create learnalert-logs
+	// paste the printed database_id below, then apply the schema with:
+	//   npx wrangler d1 execute learnalert-logs --remote --file=./migrations/0001_call_log.sql
+	// Until database_id is filled in, /logs answers 503 and the API runs
+	// exactly as before — logging is never on the critical path.
+	"d1_databases": [
+		{
+			"binding": "LOGS_DB",
+			"database_name": "learnalert-logs",
+			"database_id": "f4ae21eb-6cab-442c-86ab-f433271e35ac"
+		},
+		{
+			"binding": "COMMUNITY_DB",
+			"database_name": "learnalert-community",
+			"database_id": "20c15807-1ffa-4ef6-83ba-119a4201d112",
+			"migrations_dir": "community-migrations"
+		}
+	],
+	"r2_buckets": [
+		{ "binding": "DECK_ASSETS", "bucket_name": "learnalert-deck-assets" }
+	],
+	"triggers": { "crons": ["17 4 * * *"] },
+	"vars": {
+		"APPLE_CLIENT_ID": "com.learnalert.app",
+		"ALLOW_UNAUTHENTICATED_AI": "false",
+		"AI_LIMITS_DISABLED": "false",
+		"AI_REQUESTS_PER_IP_HOUR": "10",
+		"AI_REQUESTS_PER_IP_DAY": "50",
+		"AI_REQUESTS_PER_DAY": "200",
+		// The switcher: "cheaper_inference" or "openai".
+		"AI_PROVIDER": "cheaper_inference",
+		// Set to "true" to let a request pick the provider via X-AI-Provider.
+		"ALLOW_PROVIDER_OVERRIDE": "false",
+		// Which provider parses uploaded documents. AI_PROVIDER overrides this.
+		"DOCUMENT_PROVIDER": "openai",
+		// GET /errors is off. It was a testing aid, and it only ever saw one
+		// isolate's memory. Use X-Debug-Token for error details, or the
+		// Cloudflare dashboard logs. Set to "true" to re-enable.
+		"ERROR_LOG_ENABLED": "false",
+		// Token prices in USD per million tokens, for the /logs cost column.
+		// Left empty on purpose: costs read "n/a" rather than showing a number
+		// that was guessed. Fill in the rate card you are billed at.
+		"PRICE_INPUT_PER_MTOK": "",
+		"PRICE_CACHED_INPUT_PER_MTOK": "",
+		"PRICE_OUTPUT_PER_MTOK": ""
+	}
 }

@@ -215,8 +215,31 @@ export function normalizeGenerationResult(
     throw new DeckError("AI returned no deck for a deck response.");
   }
 
+  const normalized = normalizeGeneratedDeck(result, maxCards);
+
+  // Enforce the brief generation summary even if the model ignores the prompt.
+  // Keep whole sentences so the app never displays a clipped fragment.
+  const message = normalized.assistantMessage.replace(/\s+/gu, " ").trim();
+  const sentences = new Intl.Segmenter("en", { granularity: "sentence" })
+    .segment(message);
+  const kept = [];
+
+  for (const { segment } of sentences) {
+    const candidate = [...kept, segment.trim()].join(" ");
+    if (
+      kept.length === 2 ||
+      candidate.split(/\s+/u).length > 40 ||
+      candidate.length > 280
+    ) {
+      break;
+    }
+    kept.push(segment.trim());
+  }
+
   return {
     action: "deck",
-    ...normalizeGeneratedDeck(result, maxCards)
+    ...normalized,
+    assistantMessage: kept.join(" ") ||
+      `Created ${normalized.deck.cards.length} study ${normalized.deck.cards.length === 1 ? "card" : "cards"}.`
   };
 }

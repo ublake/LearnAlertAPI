@@ -156,6 +156,8 @@ function reportedCost(data, usage) {
   ];
 
   for (const value of candidates) {
+    if (value == null || (typeof value === "string" && value.trim() === "") ||
+        !["number", "string"].includes(typeof value)) continue;
     const parsed = Number(value);
 
     if (Number.isFinite(parsed) && parsed >= 0) return parsed;
