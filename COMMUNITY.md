@@ -137,3 +137,7 @@ Later saves can update the character with the same username, and simultaneous
 first saves cannot overwrite each other. Sign-out and sign-in restore the saved
 profile without reopening setup; Settings still opens the character editor manually.
 Account deletion continues to remove the profile and release its username.
+
+## Author moderation notices
+
+Authenticated GET /account/decks returns current saved metadata and optional status, adminNote, adminAction, adminUpdatedAt and isHidden. Notes are not returned by public browse/preview/download endpoints. App resubmissions cannot replace these admin-owned fields. Admin hard-deletion leaves a minimal Removed notice without cards/media; DELETE /decks/:id dismisses only the caller's notice. Account/profile deletion removes all their notices. Follow nextOffset with ?offset=... when refreshing; pages contain at most 50 rows ordered by latest update, then ID.

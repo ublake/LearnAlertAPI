@@ -226,3 +226,77 @@ test('admin moderation hides all public entry points, survives owner edits, rest
     assert.equal(decisions.length,3);
   } finally { await mf.dispose(); }
 });
+
+test('author admin notes stay private, survive resubmission, and deleted notices are minimal and owner-dismissible', async () => {
+  const { jwk, token } = await signing(); const jwt=await token();
+  const bundle=await build({entryPoints:['src/index.js'],bundle:true,write:false,format:'esm',platform:'browser'});
+  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-09-04',bindings:env,d1Databases:['COMMUNITY_DB'],r2Buckets:['DECK_ASSETS'],outboundService:()=>new Response(JSON.stringify({keys:[jwk]}))}));
+  try {
+    const db=await mf.getD1Database('COMMUNITY_DB'), bucket=await mf.getR2Bucket('DECK_ASSETS');
+    for(const file of (await readdir(new URL('../community-migrations/',import.meta.url))).sort()) {
+      const sql=await readFile(new URL(`../community-migrations/${file}`,import.meta.url),'utf8'), triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[];
+      for(const statement of sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();
+      for(const trigger of triggers)await db.prepare(trigger).run();
+    }
+    const session='d'.repeat(64), other='e'.repeat(64), id=crypto.randomUUID(), media=crypto.randomUUID();
+    for(const [user,bearer] of [['author',session],['other',other]]) {
+      await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,1)').bind(user,'@'+user).run();
+      await db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) VALUES(?,?,9999999999)').bind(await sha256(bearer),user).run();
+    }
+    const cards=[{id:'card',question:'Question',correctAnswer:'Answer',cardType:'tap_reveal',promptImageID:media}];
+    await db.prepare("INSERT INTO community_decks(id,owner_id,name,category_tag,color_hex,deck_type,status,created_at,updated_at,cards_json,card_count) VALUES(?,'author','Original','General','#123456','Mixed','published',1,1,?,1)").bind(id,JSON.stringify(cards)).run();
+    await db.prepare("INSERT INTO community_media(id,deck_id,object_key,content_type,byte_size,uploaded,attached,created_at) VALUES(?,?,'notice-image','image/png',3,1,1,1)").bind(media,id).run(); await bucket.put('notice-image',new Uint8Array([1,2,3]));
+    const call=(path,method='GET',body,assertion=jwt)=>mf.dispatchFetch('https://api.example.test/v1/admin/'+path,{method,headers:{'Cf-Access-Jwt-Assertion':assertion,Origin:'https://learnalertapp.com','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+    const app=(path,method='GET',body,bearer=session)=>mf.dispatchFetch('https://api.example.test/v1/community/'+path,{method,headers:{Authorization:'Bearer '+bearer,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+    const row=async()=> (await (await app('account/decks')).json()).decks.find(d=>d.id===id);
+    const current=async()=> (await (await call('decks/'+id)).json()).deck;
+    let revision=(await current()).revision;
+    const edit={name:'Edited by admin',categoryTag:'General',colorHex:'#123456',deckType:'Mixed',cards,downloadCount:0,expectedRevision:revision,adminNote:'Corrected an inaccurate answer.'};
+    assert.equal((await call('decks/'+id,'PUT',{...edit,adminNote:4})).status,400);
+    assert.equal((await call('decks/'+id,'PUT',{...edit,adminNote:'x'.repeat(1001)})).status,400);
+    assert.equal((await call('decks/'+id,'PUT',edit)).status,200);
+    let owned=await row(); assert.equal(owned.name,edit.name); assert.equal(owned.adminNote,edit.adminNote); assert.equal(owned.adminAction,'edited'); assert.ok(owned.adminUpdatedAt); assert.equal(owned.status,'published'); assert.equal(owned.isHidden,false);
+    for(const path of ['decks','decks/'+id+'/preview','decks/'+id]) {
+      const response=await app(path,'GET',undefined,''); assert.equal(response.status,200);
+      const payload=await response.json(), publicRow=payload.deck||payload.decks.find(d=>d.id===id);
+      for(const field of ['adminNote','adminAction','adminUpdatedAt','status','isHidden'])assert.equal(field in publicRow,false);
+    }
+    assert.equal((await call('decks/'+id,'PUT',edit)).status,409); assert.equal((await row()).adminNote,edit.adminNote);
+    revision=(await current()).revision;
+    assert.equal((await call('decks/'+id,'PATCH',{hidden:true,adminNote:'Hidden while being checked.',expectedRevision:revision})).status,200);
+    assert.equal((await row()).adminAction,'hidden'); assert.equal((await row()).isHidden,true);
+    assert.equal((await call('decks/'+id,'PATCH',{hidden:false,expectedRevision:revision})).status,409);
+    assert.equal((await app('decks/'+id,'PUT',{...edit,adminNote:'Author cannot spoof a note',adminAction:'restored'})).status,202);
+    owned=await row(); assert.equal(owned.status,'draft'); assert.equal(owned.adminNote,'Hidden while being checked.'); assert.equal(owned.adminAction,'hidden'); assert.equal(owned.isHidden,true);
+    revision=(await current()).revision;
+    assert.equal((await call('decks/'+id,'PUT',{...edit,expectedRevision:revision,adminNote:'Edited while hidden.'})).status,200);
+    assert.equal((await row()).isHidden,true); assert.equal((await row()).adminAction,'edited');
+    revision=(await current()).revision;
+    assert.equal((await call('decks/'+id,'PATCH',{hidden:false,expectedRevision:revision,adminNote:'Ready for another review.'})).status,200);
+    assert.equal((await row()).adminAction,'restored'); assert.equal((await row()).isHidden,false);
+    revision=(await current()).revision;
+    assert.equal((await call('decks/'+id,'DELETE',{expectedRevision:revision-1,adminNote:'Stale'})).status,409);
+    assert.equal((await call('decks/'+id,'DELETE',{expectedRevision:revision,adminNote:'Removed due to inappropriate content.'},'')).status,401);
+    assert.equal((await call('decks/'+id,'DELETE',{expectedRevision:revision,adminNote:'Removed due to inappropriate content.'})).status,200);
+    assert.equal(await db.prepare('SELECT id FROM community_decks WHERE id=?').bind(id).first(),null);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_media WHERE deck_id=?').bind(id).first()).n,0);
+    owned=await row(); assert.equal(owned.status,'deleted'); assert.equal(owned.adminAction,'removed'); assert.equal(owned.adminNote,'Removed due to inappropriate content.'); assert.equal(owned.name,edit.name); assert.equal(owned.cardCount,1); assert.equal(owned.isHidden,false); assert.equal('cards' in owned,false);
+    const tombstone=await db.prepare('SELECT * FROM community_deck_notices WHERE deck_id=?').bind(id).first();
+    assert.deepEqual(Object.keys(tombstone).sort(),['deck_id','owner_id','name','card_count','admin_note','admin_updated_at'].sort());
+    for(const path of ['decks/'+id,'decks/'+id+'/preview','media/'+media]) assert.equal((await app(path)).status,404);
+    await cleanupCommunity({COMMUNITY_DB:db,DECK_ASSETS:bucket}); assert.equal(await bucket.head('notice-image'),null); assert.ok(await row());
+    assert.equal((await app('decks/'+id,'DELETE',undefined,other)).status,404); assert.ok(await row());
+    assert.equal((await app('decks/'+id,'DELETE')).status,200); assert.equal(await row(),undefined);
+    assert.equal((await app('decks/'+id,'DELETE')).status,404);
+    // More than one page of notices must not erase existing active entries.
+    for(let i=0;i<52;i++)await db.prepare('INSERT INTO community_deck_notices(deck_id,owner_id,name,card_count,admin_note,admin_updated_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(),'author','Removed '+i,1,'Notice',i+1).run();
+    let page=await (await app('account/decks')).json(); assert.equal(page.decks.length,50); assert.equal(page.nextOffset,50);
+    page=await (await app('account/decks?offset=50')).json(); assert.equal(page.decks.length,2); assert.equal(page.nextOffset,null);
+    assert.equal((await (await app('account/decks','GET',undefined,other)).json()).decks.length,0);
+    assert.equal((await app('account','DELETE')).status,200); assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM community_deck_notices WHERE owner_id='author'").first()).n,0);
+    const deletedOwner='profile-owner'; await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,1)').bind(deletedOwner,'@profile_owner').run();
+    await db.prepare('INSERT INTO community_deck_notices(deck_id,owner_id,name,card_count,admin_updated_at) VALUES(?,?,?,1,1)').bind(crypto.randomUUID(),deletedOwner,'Removed').run();
+    assert.equal((await call('profiles/delete','POST',{id:deletedOwner})).status,200);assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_deck_notices WHERE owner_id=?').bind(deletedOwner).first()).n,0);
+    const audit=(await (await call('audit')).json()).items.find(r=>r.action==='delete_deck'&&r.target===id); assert.equal(JSON.parse(audit.details).adminNote,'Removed due to inappropriate content.');
+  } finally {await mf.dispose();}
+});

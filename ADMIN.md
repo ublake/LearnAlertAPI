@@ -10,9 +10,9 @@ Activated October 13, 2026:
   `23e89d5c-ec41-43db-ad8b-8e518866b3ee`.
 - Login method: one-time PIN only; one-hour application sessions; HTTP-only
   authorization cookie; application hidden from the Access launcher.
-- Migrations `0005_admin.sql` through `0008_community_review.sql` applied to production D1.
-- API release: `72cde401-d276-4d2a-95c3-4b877ef14563`.
-- Website release: `2fe18e38-6d47-46b8-a4d1-b7d12d205d37`.
+- Migrations `0005_admin.sql` through `0009_author_admin_notices.sql` applied to production D1.
+- API release: `74a5a897-984d-4374-9b21-40e3ba36850a`.
+- Website release: `e132451d-8cc8-4b5d-9b3a-3f0504bf3e04`.
 - Migration `0006_deck_revisions.sql` applied for optimistic editor saves.
 
 Production checks passed: signed-out admin routes redirect to Access; direct
@@ -122,3 +122,15 @@ Reviews shows pending submissions with full card/media previews, submitted dates
 Migration 0008 adds review status, message, submission/review timestamps, reviewer, and transactional attachment validation for submissions. API integration tests cover private cards/media, owner status, retention, resubmission, approval/rejection, stale decisions, origin checks, and audit records.
 
 Review release verification: all 92 API tests pass; website lint/build and all seven format JSON examples pass. A temporary production profile submitted a PNG deck through the app API: HTTP 202, owner pending status, anonymous cards/preview/media/HEAD/report denied, owner image bytes matched. Fixture profile/session/deck/media were removed; normal public deck IDs, names and card counts stayed unchanged. Admin review API rejects anonymous callers with 401; site/proxy redirect to Access. Live signed-in approval/rejection was not re-exercised for this release; those decisions are covered by the integration tests.
+
+## Notes to authors and removed notices
+
+Deck edits, Hide/Restore and deck deletion have an optional Note to author (up to 1000 characters). Each successful action replaces the previous note/action/time; an empty note clears the previous text. User resubmissions and review decisions preserve it. Notes are private: only the authenticated author account list and protected admin routes expose them. The author sees current metadata/card counts after edits; local personal/downloaded decks are unchanged.
+
+Migration 0009_author_admin_notices.sql adds note fields and a separate minimal author-owned deletion notice. Hard deletion still removes cards, reports and media metadata immediately and queues R2 cleanup; the notice stores only the deck ID, owner ID, title, card count, note and action time. It survives media cleanup until the author dismisses it or the account/profile is deleted. Existing historical deletions are not reconstructed.
+
+Owner GET /v1/community/account/decks includes optional status (draft/published/deleted), adminNote, adminAction (edited/removed/hidden/restored or null), adminUpdatedAt (epoch seconds or null), and isHidden (boolean). Removed notices use status=deleted, adminAction=removed and isHidden=false. They contain no cards/media references, with empty/default metadata for compatibility. Public browse/preview/download payloads omit all five fields. Lists are paginated at 50 rows using offset and nextOffset; a refresh should follow every page. Owner DELETE /v1/community/decks/:id dismisses an owned notice when the original deck is gone, and returns 404 for another owner's notice.
+
+Admin PUT continues to require expectedRevision; dashboard Hide/Restore and Delete also send it. Older API callers may omit expectedRevision for Hide/Restore/Delete, but each operation still uses the database snapshot's revision to atomically guard note updates, deletion, media queuing, the removal notice and audit logging.
+
+Author-notice release verification: 93 API tests pass; website lint, build and targeted admin TypeScript checks pass. The production owner API was tested with isolated seeded admin edit/delete states plus real owner submissions, PNG upload/access and notice dismissal. Private notes stayed protected through resubmission, Removed rows had no cards/media, public responses omitted the new fields, and test profile/session/deck/notice/R2 data were cleaned up. Existing public deck IDs, names and card counts were unchanged. Live signed-in admin edit/delete controls were not exercised in this release; their endpoints and atomic audit/cleanup behavior are covered by integration tests.

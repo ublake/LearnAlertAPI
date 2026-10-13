@@ -29,12 +29,13 @@ function avatarResponse(row) {
 function profileResponse(row) {
   return { handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
 }
-function deckResponse(row, detail = false) {
+function deckResponse(row, detail = false, owner = false) {
   return { id: row.id, name: row.name, description: row.description, authorHandle: row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
     ...(row.review_status ? { reviewStatus: row.review_status } : {}),
     reviewMessage: row.review_message ?? null, submittedAt: row.submitted_at ?? null,
+    ...(owner ? { status: row.status, adminNote: row.admin_note ?? null, adminAction: row.admin_action ?? null, adminUpdatedAt: row.admin_updated_at ?? null, isHidden: Boolean(row.admin_hidden) } : {}),
     ...(detail ? { cards: JSON.parse(row.cards_json) } : {}) };
 }
 
@@ -98,10 +99,15 @@ async function handle(request, env) {
 
   if (path === '/v1/community/account/decks' && method === 'GET') {
     const user = await communityUser(request, env);
-    const { results } = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
-      JOIN community_users u ON u.id=d.owner_id WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected'))
-      ORDER BY COALESCE(d.submitted_at,d.published_at,d.created_at) DESC,d.id DESC LIMIT 50`).bind(user.id).all();
-    return json({ decks: results.map(row => deckResponse(row)), nextOffset: null });
+    const offset = Math.max(0, Math.min(100000, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
+    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,d.updated_at AS sort_at
+      FROM community_decks d JOIN community_users u ON u.id=d.owner_id
+      WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected') OR d.admin_action IS NOT NULL)
+      UNION ALL
+      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,n.admin_updated_at
+      FROM community_deck_notices n JOIN community_users u ON u.id=n.owner_id WHERE n.owner_id=?
+      ORDER BY sort_at DESC,id DESC LIMIT 51 OFFSET ?`).bind(user.id,user.id,offset).all();
+    return json({ decks: results.slice(0,50).map(row => deckResponse(row,false,true)), nextOffset: results.length>50 ? offset+50 : null });
   }
 
   if (path === '/v1/community/account' && method === 'DELETE') {
@@ -262,6 +268,10 @@ async function handle(request, env) {
       return json({ deck: deckResponse({ ...row, download_count: row.download_count + 1 }, true) });
     }
     const user = await communityUser(request, env);
+    if (method === 'DELETE') {
+      const dismissed = await db.prepare('DELETE FROM community_deck_notices WHERE deck_id=? AND owner_id=?').bind(id,user.id).run();
+      if (dismissed.meta.changes) return json({ success: true });
+    }
     await ownedDeck(env, id, user);
     if (method === 'PUT' || method === 'PATCH') {
       const { metadata: meta, cards, media } = validateCommunityDeck(await readCommunityJSON(request));

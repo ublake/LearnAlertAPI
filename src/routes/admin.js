@@ -8,6 +8,15 @@ function reply(value, status = 200) {
     'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex, nofollow'
   } });
 }
+function authorNote(body) {
+  if (!body || typeof body !== 'object') throw new CommunityError(400, 'Invalid admin request.');
+  if (body.adminNote == null) return null;
+  if (typeof body.adminNote !== 'string' || body.adminNote.length > 1000) throw new CommunityError(400, 'Note to author must be text up to 1000 characters.');
+  return body.adminNote.trim() || null;
+}
+function revisionMatches(body, deck) {
+  if (body.expectedRevision !== undefined && (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision !== deck.revision)) throw new CommunityError(409, 'Deck changed. Reload it before continuing.');
+}
 const now = () => Math.floor(Date.now() / 1000);
 export async function admin(request, env) {
   try {
@@ -112,12 +121,12 @@ export async function admin(request, env) {
     if (method === 'GET' && path === 'reviews') {
       const status = url.searchParams.get('status') || 'pending';
       if (!['pending','approved','rejected'].includes(status)) throw new CommunityError(400, 'Invalid review status.');
-      list = await db.prepare(`SELECT d.id,d.name,d.description,d.status,d.review_status,d.review_message,d.submitted_at,d.reviewed_at,d.revision,d.admin_hidden,d.card_count,u.handle
+      list = await db.prepare(`SELECT d.id,d.name,d.description,d.status,d.review_status,d.review_message,d.submitted_at,d.reviewed_at,d.revision,d.admin_hidden,d.card_count,d.admin_note,d.admin_action,d.admin_updated_at,u.handle
         FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.status!='deleted' AND d.review_status=? AND d.submitted_at IS NOT NULL
         AND (?='' OR d.name LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\') ORDER BY d.submitted_at DESC,d.id LIMIT 51 OFFSET ?`)
         .bind(status,q,pattern,pattern,offset).all();
     } else if (method === 'GET' && path === 'decks') {
-      list = await db.prepare(`SELECT d.id,d.name,d.description,d.category_tag,d.status,d.admin_hidden,d.card_count,d.download_count,d.created_at,d.updated_at,d.published_at,d.review_status,d.review_message,d.submitted_at,d.reviewed_at,d.revision,d.admin_created,u.handle,
+      list = await db.prepare(`SELECT d.id,d.name,d.description,d.category_tag,d.status,d.admin_hidden,d.card_count,d.download_count,d.created_at,d.updated_at,d.published_at,d.review_status,d.review_message,d.submitted_at,d.reviewed_at,d.revision,d.admin_created,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,
         (SELECT COUNT(*) FROM community_reports r WHERE r.deck_id=d.id AND r.resolved_at IS NULL) AS report_count
         FROM community_decks d JOIN community_users u ON u.id=d.owner_id
         WHERE (?='' OR d.name LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\') ORDER BY d.created_at DESC,d.id LIMIT 51 OFFSET ?`).bind(q, pattern, pattern, offset).all();
@@ -127,7 +136,7 @@ export async function admin(request, env) {
         FROM community_users u WHERE (?='' OR u.handle LIKE ? ESCAPE '\\') ORDER BY u.created_at DESC,u.id LIMIT 51 OFFSET ?`).bind(q, pattern, offset).all();
     } else if (method === 'GET' && path === 'reports') {
       const resolved = url.searchParams.get('resolved') === 'true' ? 1 : 0;
-      list = await db.prepare(`SELECT r.*,d.name,d.status,d.admin_hidden,owner.handle AS owner_handle,reporter.handle AS reporter_handle
+      list = await db.prepare(`SELECT r.*,d.name,d.status,d.revision,d.admin_hidden,d.admin_note,d.admin_action,d.admin_updated_at,owner.handle AS owner_handle,reporter.handle AS reporter_handle
         FROM community_reports r JOIN community_decks d ON d.id=r.deck_id
         JOIN community_users owner ON owner.id=d.owner_id JOIN community_users reporter ON reporter.id=r.user_id
         WHERE (r.resolved_at IS NOT NULL)=? AND (?='' OR d.name LIKE ? ESCAPE '\\' OR r.reason LIKE ? ESCAPE '\\')
@@ -168,6 +177,7 @@ export async function admin(request, env) {
     const detail = path.match(/^decks\/([a-fA-F0-9-]{36})$/);
     if (detail && method === 'PUT') {
       const body = await readCommunityJSON(request);
+      const note = authorNote(body);
       if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0) throw new CommunityError(400, 'Reload the deck before editing.');
       if (!Number.isSafeInteger(body.downloadCount) || body.downloadCount < 0 || body.downloadCount > 2147483647) throw new CommunityError(400, 'Downloads must be a whole number from 0 to 2147483647.');
       const current = await db.prepare("SELECT * FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
@@ -185,7 +195,7 @@ export async function admin(request, env) {
       const guard = "EXISTS(SELECT 1 FROM community_decks WHERE id=? AND revision=? AND status!='deleted')";
       const statements = [
         db.prepare(`INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,'edit_deck',?,?,? WHERE ${guard}`)
-          .bind(crypto.randomUUID(), actor, detail[1], JSON.stringify({ before: { name: current.name, description: current.description, categoryTag: current.category_tag, colorHex: current.color_hex, deckType: current.deck_type, downloadCount: current.download_count, cards: JSON.parse(current.cards_json) }, after: { ...meta, cardCount: cards.length, downloadCount: body.downloadCount } }), now(), detail[1], body.expectedRevision),
+          .bind(crypto.randomUUID(), actor, detail[1], JSON.stringify({ before: { name: current.name, description: current.description, categoryTag: current.category_tag, colorHex: current.color_hex, deckType: current.deck_type, downloadCount: current.download_count, cards: JSON.parse(current.cards_json) }, after: { ...meta, cardCount: cards.length, downloadCount: body.downloadCount, adminNote: note }, previousAdminNote: current.admin_note }), now(), detail[1], body.expectedRevision),
         db.prepare(`UPDATE community_media SET attached=0 WHERE deck_id=? AND ${guard}`).bind(detail[1], detail[1], body.expectedRevision)
       ];
       const ids = [...media.keys()];
@@ -193,20 +203,27 @@ export async function admin(request, env) {
         const chunk = ids.slice(start, start + 85);
         statements.push(db.prepare(`UPDATE community_media SET attached=1 WHERE deck_id=? AND id IN (${chunk.map(() => '?').join(',')}) AND ${guard}`).bind(detail[1], ...chunk, detail[1], body.expectedRevision));
       }
-      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,download_count=?,updated_at=?
-        WHERE id=? AND revision=? AND status!='deleted'`).bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, body.downloadCount, now(), detail[1], body.expectedRevision));
+      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,download_count=?,updated_at=?,admin_note=?,admin_action='edited',admin_updated_at=?
+        WHERE id=? AND revision=? AND status!='deleted'`).bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, body.downloadCount, now(), note, now(), detail[1], body.expectedRevision));
       const result = await db.batch(statements);
       if (!result.at(-1).meta.changes) throw new CommunityError(409, 'This deck changed while saving. Reload it before saving.');
       return reply({ success: true });
     }
     if (detail && method === 'DELETE') {
-      const deck = await db.prepare("SELECT name,status FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
+      const body = await readCommunityJSON(request), note = authorNote(body);
+      const deck = await db.prepare("SELECT * FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
       if (!deck) throw new CommunityError(404, 'Deck not found or already deleted.');
-      await db.batch([
-        db.prepare('INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT object_key,? FROM community_media WHERE deck_id=?').bind(now(), detail[1]),
-        db.prepare('DELETE FROM community_decks WHERE id=?').bind(detail[1]),
-        audit('delete_deck', detail[1], { name: deck.name, previousStatus: deck.status })
+      revisionMatches(body,deck);
+      const guard = "EXISTS(SELECT 1 FROM community_decks WHERE id=? AND revision=? AND status!='deleted')";
+      const result = await db.batch([
+        db.prepare(`INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,'delete_deck',?,?,? WHERE ${guard}`)
+          .bind(crypto.randomUUID(),actor,deck.id,JSON.stringify({ name:deck.name,previousStatus:deck.status,adminNote:note,previousAdminNote:deck.admin_note }),now(),deck.id,deck.revision),
+        db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT object_key,? FROM community_media WHERE deck_id=? AND ${guard}`).bind(now(),deck.id,deck.id,deck.revision),
+        db.prepare(`INSERT INTO community_deck_notices(deck_id,owner_id,name,card_count,admin_note,admin_updated_at)
+          SELECT id,owner_id,name,card_count,?,? FROM community_decks WHERE id=? AND revision=? AND status!='deleted'`).bind(note,now(),deck.id,deck.revision),
+        db.prepare("DELETE FROM community_decks WHERE id=? AND revision=? AND status!='deleted'").bind(deck.id,deck.revision)
       ]);
+      if (!result.at(-1).meta.changes) throw new CommunityError(409, 'Deck changed while deleting. Reload it.');
       return reply({ success: true });
     }
     if (detail && method === 'GET') {
@@ -222,14 +239,18 @@ export async function admin(request, env) {
       return new Response(object.body, { headers: { 'Content-Type': row.content_type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
     }
     if (detail && method === 'PATCH') {
-      const body = await readCommunityJSON(request);
+      const body = await readCommunityJSON(request), note = authorNote(body);
       if (typeof body.hidden !== 'boolean') throw new CommunityError(400, 'Choose a visibility state.');
-      const deck = await db.prepare("SELECT admin_hidden FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
+      const deck = await db.prepare("SELECT admin_hidden,revision FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
       if (!deck) throw new CommunityError(404, 'Deck not found or already deleted.');
-      await db.batch([
-        db.prepare("UPDATE community_decks SET admin_hidden=?,updated_at=? WHERE id=? AND status!='deleted'").bind(body.hidden ? 1 : 0, now(), detail[1]),
-        audit(body.hidden ? 'hide_deck' : 'restore_deck', detail[1], { before: deck.admin_hidden, hidden: body.hidden })
+      revisionMatches(body,deck);
+      const result = await db.batch([
+        db.prepare("INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM community_decks WHERE id=? AND revision=? AND status!='deleted')")
+          .bind(crypto.randomUUID(),actor,body.hidden ? 'hide_deck' : 'restore_deck',detail[1],JSON.stringify({ before:deck.admin_hidden,hidden:body.hidden,adminNote:note }),now(),detail[1],deck.revision),
+        db.prepare("UPDATE community_decks SET admin_hidden=?,updated_at=?,admin_note=?,admin_action=?,admin_updated_at=? WHERE id=? AND revision=? AND status!='deleted'")
+          .bind(body.hidden ? 1 : 0,now(),note,body.hidden ? 'hidden' : 'restored',now(),detail[1],deck.revision)
       ]);
+      if (!result.at(-1).meta.changes) throw new CommunityError(409, 'Deck changed while updating visibility. Reload it.');
       return reply({ success: true });
     }
     if (path === 'profiles/delete' && method === 'POST') {
