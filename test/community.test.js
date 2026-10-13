@@ -69,7 +69,13 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
       const headers = {};
       if (token) headers.Authorization = `Bearer ${token}`;
       if (body && !(body instanceof Uint8Array)) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
-      return mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers, body });
+      const response = await mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers, body });
+      // These ownership/media scenarios inspect a reviewed publication. The
+      // pending/approve/reject lifecycle is exercised separately in admin.test.
+      if (method === 'PUT' && /^decks\/[a-f0-9-]{36}$/i.test(path) && response.status === 202) {
+        await db.prepare("UPDATE community_decks SET status='published',review_status='approved',published_at=COALESCE(published_at,?) WHERE id=?").bind(Math.floor(Date.now()/1000),path.slice(6)).run();
+      }
+      return response;
     }
     assert.equal((await request('account')).status, 401);
     assert.equal((await request('account/decks')).status, 401);
@@ -138,7 +144,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     unknown.cards[0].promptImageID = crypto.randomUUID();
     assert.equal((await request(`decks/${id}`, 'PUT', unknown, ownerToken)).status, 400);
     const published = await request(`decks/${id}`, 'PUT', payload, ownerToken);
-    assert.equal(published.status, 200, await published.text());
+    assert.equal(published.status, 202, await published.text());
     const listing = await (await request('decks?category=Science&q=Images')).json();
     assert.equal(listing.decks.length, 1);
     assert.equal(listing.decks[0].cards, undefined);
@@ -171,7 +177,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal((await request(`decks/${id}`, 'PUT', oversized, ownerToken)).status, 413);
     const updated = structuredClone(payload);
     updated.cards[0].promptImageID = replacementID;
-    assert.equal((await request(`decks/${id}`, 'PUT', updated, ownerToken)).status, 200);
+    assert.equal((await request(`decks/${id}`, 'PUT', updated, ownerToken)).status, 202);
     assert.equal((await request(`media/${imageID}`)).status, 404);
     assert.equal((await request(`media/${replacementID}`)).status, 200);
     const bucket = await mf.getR2Bucket('DECK_ASSETS');
@@ -217,7 +223,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal((await request(`media/${imageID}`)).status, 404);
     // Moderator removal is independent of ownership and immediately hides a deck.
     const moderatedID = (await (await request('decks/drafts', 'POST', { name: 'Moderation test' }, ownerToken)).json()).id;
-    assert.equal((await request(`decks/${moderatedID}`, 'PUT', { name: 'Moderation test', cards: [{ id: 'q', question: 'Q', correctAnswer: 'A', cardType: 'tap_reveal' }] }, ownerToken)).status, 200);
+    assert.equal((await request(`decks/${moderatedID}`, 'PUT', { name: 'Moderation test', cards: [{ id: 'q', question: 'Q', correctAnswer: 'A', cardType: 'tap_reveal' }] }, ownerToken)).status, 202);
     assert.equal((await mf.dispatchFetch(`https://api.example.test/v1/community/moderation/decks/${moderatedID}`, {
       method: 'DELETE', headers: { Authorization: 'Bearer wrong' }
     })).status, 404);
@@ -231,14 +237,14 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     }
     const originalID = (await (await request('decks/drafts', 'POST', { name: 'Original content' }, ownerToken)).json()).id;
     const original = { name: 'Original content', cards: ['Mercury', 'Venus', 'Earth'].map((answer, i) => ({ id: `original-${i}`, question: `Planet ${i + 1}`, correctAnswer: answer, cardType: 'tap_reveal' })) };
-    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 200);
+    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 202);
     const copyID = (await (await request('decks/drafts', 'POST', { name: 'Renamed copy' }, otherToken)).json()).id;
     const copied = { name: 'Renamed copy', cards: original.cards.toReversed().map((card, i) => ({ ...card, id: `new-${i}`, question: `  ${card.question.toUpperCase()}  ` })) };
     assert.equal((await request(`decks/${copyID}`, 'PUT', copied, otherToken)).status, 409);
     // Original creators can still update their own publications.
-    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 200);
+    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 202);
     copied.cards[0].correctAnswer = 'Different material';
-    assert.equal((await request(`decks/${copyID}`, 'PUT', copied, otherToken)).status, 200);
+    assert.equal((await request(`decks/${copyID}`, 'PUT', copied, otherToken)).status, 202);
 
     // Account deletion removes profiles, sessions and public copies, preserving an R2 retry queue.
     const accountID = (await (await request('decks/drafts', 'POST', { name: 'Account removal' }, ownerToken)).json()).id;
@@ -246,7 +252,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
       method: 'POST', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${ownerToken}` }, body: image
     });
     const attachmentID = (await attachment.json()).id;
-    assert.equal((await request(`decks/${accountID}`, 'PUT', { name: 'Account removal', cards: [{ id: 'q', question: 'Q', correctAnswer: 'A', cardType: 'tap_reveal', promptImageID: attachmentID }] }, ownerToken)).status, 200);
+    assert.equal((await request(`decks/${accountID}`, 'PUT', { name: 'Account removal', cards: [{ id: 'q', question: 'Q', correctAnswer: 'A', cardType: 'tap_reveal', promptImageID: attachmentID }] }, ownerToken)).status, 202);
     assert.equal((await request('account', 'DELETE')).status, 401);
     assert.equal((await request('account', 'DELETE', undefined, ownerToken)).status, 200);
     assert.equal((await request(`decks/${accountID}`)).status, 404);

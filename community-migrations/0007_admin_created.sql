@@ -1,0 +1,1 @@
+ALTER TABLE community_decks ADD COLUMN admin_created INTEGER NOT NULL DEFAULT 0;

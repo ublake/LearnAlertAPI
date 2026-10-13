@@ -30,6 +30,11 @@
 	],
 	"triggers": { "crons": ["17 4 * * *"] },
 	"vars": {
+		"ADMIN_EMAILS": "ttw55970@gmail.com",
+		// Cloudflare Access app for learnalertapp.com/admin and /admin/*.
+		// The API independently validates the signed assertion and owner email.
+		"ADMIN_ACCESS_ISSUER": "https://hidden-truth-1193.cloudflareaccess.com",
+		"ADMIN_ACCESS_AUD": "5769e0b6023df405b93d867563e85fcb672a925c32a8690304d28f0afdd1d04e",
 		"APPLE_CLIENT_ID": "com.learnalert.app",
 		"ALLOW_UNAUTHENTICATED_AI": "false",
 		"AI_LIMITS_DISABLED": "false",

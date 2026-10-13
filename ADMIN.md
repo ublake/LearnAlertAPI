@@ -1,0 +1,124 @@
+# LearnAlert admin
+
+## Production configuration
+
+Activated October 13, 2026:
+
+- Access application: `LearnAlert Admin`, ID `4346bfdc-b397-4004-8476-3a8e7191199a`.
+- Issuer: `https://hidden-truth-1193.cloudflareaccess.com`.
+- Owner policy: exact email `ttw55970@gmail.com`, policy ID
+  `23e89d5c-ec41-43db-ad8b-8e518866b3ee`.
+- Login method: one-time PIN only; one-hour application sessions; HTTP-only
+  authorization cookie; application hidden from the Access launcher.
+- Migrations `0005_admin.sql` through `0008_community_review.sql` applied to production D1.
+- API release: `72cde401-d276-4d2a-95c3-4b877ef14563`.
+- Website release: `2fe18e38-6d47-46b8-a4d1-b7d12d205d37`.
+- Migration `0006_deck_revisions.sql` applied for optimistic editor saves.
+
+Production checks passed: signed-out admin routes redirect to Access; direct
+admin API and forged identity requests return 401; homepage and public deck
+browsing return 200. Owner email-code sign-in loads the correct live totals,
+profiles, reports and full card previews. Hide/restore and audit logging were
+verified with a temporary private draft; its test records were removed afterward.
+The homepage has no admin link.
+
+The account owner activated the Zero Trust Free subscription and confirmed
+owner-only application access. Cloudflare's free-plan checkout requires its
+terms and an authorization for usage exceeding free limits.
+
+The dashboard lives at `https://learnalertapp.com/admin`. The public website has
+no login link. Decks, profiles, reports and media remain in the existing community
+D1 database and R2 bucket. The website proxies same-origin requests to the API;
+the browser never receives a database credential or the moderation token.
+
+## Activate sign-in
+
+1. In Cloudflare Zero Trust, create a self-hosted Access application named
+   `LearnAlert Admin`. Protect both `learnalertapp.com/admin` and
+   `learnalertapp.com/admin/*`, including nested API paths. Do not protect the
+   homepage or the app's `/v1/community/*` API.
+2. Add an Allow policy with **Emails: `ttw55970@gmail.com`**. Enable one-time PIN
+   as the identity provider, use a one-hour session, and keep the app out of the
+   Access launcher. Do not use an Everyone, Bypass, or Service Auth policy.
+3. Copy the team's issuer (`https://<team>.cloudflareaccess.com`) and this
+   application's audience tag into `ADMIN_ACCESS_ISSUER` and `ADMIN_ACCESS_AUD`
+   in `wrangler.jsonc`. `ADMIN_EMAILS` also enforces the allowlist at the Worker.
+   These are configuration values, not passwords. All admin endpoints fail
+   closed until the three values are configured.
+4. Apply migration 0005 before deploying the API:
+   `npx wrangler d1 migrations apply learnalert-community --remote`.
+5. Run `npm test`, then `npm run deploy` here. In the website checkout, run
+   `npm run lint`, `npm run build`, and `npm run deploy`.
+6. In a signed-out browser, confirm `/admin` and `/admin/api/overview` both
+   require Access login. Sign in with the allowed email and check dashboard
+   counts, previews and private media. A different email must be denied.
+   Direct `/v1/admin/overview` calls without a signed Access assertion must
+   return 401, including on the API's workers.dev URL.
+
+## Manual creation and AI import
+
+New deck offers Blank deck and Import JSON. Choose the official @learnalert
+publisher or an existing author. Official publishing uses a dedicated admin
+profile, with no Apple sign-in session. JSON imports use promptImage, promptAudio
+and optionImages filenames plus selected image/audio files. The client validates
+cards before creating a private draft, uploads referenced files once, replaces
+filenames with media IDs, saves validated content, and opens the editor. Draft
+creation, uploads and publication are audited. Publish deck validates the saved
+snapshot and checks its revision before changing public visibility.
+
+The website provides /admin-deck-format.md and /admin-deck-template.json plus
+a copyable AI prompt. Original generated files must be supplied separately;
+remote URLs and base64 are not imported. PNG/JPEG are limited to 10 MB per file;
+MP3/M4A/WAV to 20 MB. Saving/linking retains attachments; unused unsaved uploads
+may be cleaned up after 24 hours. Admin-created drafts are retained until deleted.
+Migration 0007_admin_created.sql must be applied before deploying these routes.
+
+## Available controls
+
+Decks display created, published, and updated dates. Edit opens metadata fields,
+the download counter, and card forms for questions, answers, choices, matching
+pairs, hints and sections. Cards can be added/removed, and Edit JSON exposes all
+card fields, including existing media references. Saved changes update the
+community copy; existing device-local downloads are not remotely rewritten.
+Creation/publication dates, creator ownership and visibility are preserved.
+The update date is set on save. Every edit is audited with its previous content.
+Card validation and attachment ownership/type/size checks run at the API.
+Revision checks reject stale saves, including intervening owner edits, hiding,
+or download-count changes, without changing cards or attachment bookkeeping.
+
+- Decks: search, page, inspect every card and image/audio attachment, hide and
+  restore. Hiding blocks public browsing, previews, downloads and media access.
+  The owner can still access attachments using their own session. The hide flag
+  survives owner updates. Restoring preserves the existing draft/published state.
+- Profiles: search and rename a username, enforcing the existing format and
+  uniqueness rules. This is an administrator exception to the app's locked name.
+- Reports: review open/resolved reports, preview or hide the reported deck, and
+  resolve individual reports. A new report resets its resolution state.
+- Audit: page through who changed visibility, renamed a profile, or resolved a
+  report, with timestamps and before/after details.
+
+Hiding does not delete cards/media or trigger R2 cleanup. It cannot remotely
+remove copies that people already downloaded to their devices. Deleted decks
+cannot be restored here because the existing deletion cleanup may remove media.
+Delete buttons are available for decks, reports, and profiles. Each requires an
+explicit confirmation in the dashboard and writes an audit entry. Deck deletion
+removes its D1 row, attached report/media metadata, and queues R2 objects for
+cleanup. Profile deletion removes all that user's community decks and reports,
+revokes every session, and queues their media. Personal device-local decks are
+unaffected; signing in with Apple again can create a new profile. Report deletion
+removes only that report and preserves its reason in the audit log. These actions
+cannot be undone; use Hide for reversible deck moderation. User bans are not
+included.
+
+Admin writes require a JSON body and a same-origin browser request. The API
+validates Access JWT signatures, issuer, audience, lifetime and allowed email,
+and returns no CORS permissions for admin endpoints. No arbitrary SQL execution
+or session-token listing is exposed.
+
+## Manual community review
+
+Reviews shows pending submissions with full card/media previews, submitted dates, and revision-guarded Approve/Reject controls. Rejection requires a reason. Owner submissions and edits return HTTP 202 and remain private until approved; the app displays “Review can take up to 3 days.” This is an expectation, not an automatic approval timer. Pending/rejected submissions and their linked media are retained until deleted. Existing published decks remain approved. Trusted admin-created imports can still publish directly. Approval/rejection is audited; approval preserves an existing hide flag.
+
+Migration 0008 adds review status, message, submission/review timestamps, reviewer, and transactional attachment validation for submissions. API integration tests cover private cards/media, owner status, retention, resubmission, approval/rejection, stale decisions, origin checks, and audit records.
+
+Review release verification: all 92 API tests pass; website lint/build and all seven format JSON examples pass. A temporary production profile submitted a PNG deck through the app API: HTTP 202, owner pending status, anonymous cards/preview/media/HEAD/report denied, owner image bytes matched. Fixture profile/session/deck/media were removed; normal public deck IDs, names and card counts stayed unchanged. Admin review API rejects anonymous callers with 401; site/proxy redirect to Access. Live signed-in approval/rejection was not re-exercised for this release; those decisions are covered by the integration tests.

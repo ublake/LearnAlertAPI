@@ -24,6 +24,7 @@ import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
 import { limitAIRequest, pruneAILimits } from "./lib/aiLimits.js";
 import { community, cleanupCommunity } from "./routes/community.js";
+import { admin } from "./routes/admin.js";
 
 function classify(error) {
   if (error instanceof ValidationError) {
@@ -93,6 +94,8 @@ export default {
   async fetch(request, env, ctx) {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith('/v1/admin/')) return admin(request, env);
 
     if (request.method === "OPTIONS") {
       return optionsResponse();

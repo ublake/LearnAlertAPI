@@ -7,7 +7,7 @@ The marketing site stays at `learnalertapp.com`; uploads need no additional doma
 Deck metadata, card snapshots, ownership, sessions, and reports live in the
 `learnalert-community` D1 database. Image/audio files live in the private
 `learnalert-deck-assets` R2 bucket. Keep public bucket access disabled: the Worker
-checks that an attachment belongs to a published deck before serving it.
+checks that an attachment belongs to an approved, published, visible deck before serving it publicly.
 
 ## App flow
 
@@ -15,9 +15,11 @@ checks that an attachment belongs to a published deck before serving it.
    MP3, M4A, or WAV question clip using the card editor.
 2. Open Discover → Community decks → Share. Sign in with Apple when publishing,
    or use the profile card at the top of Settings. Choose a username and character.
-3. Choose a deck, category, and description. Publishing uploads a draft's media
-   and then atomically publishes its card snapshot. Updates retain the public ID for the same owner. Sharing after an account
-   change creates a new publication.
+3. Choose a deck, category, and description. Submission uploads media and saves
+   a private card snapshot for manual review. Review can take up to 3 days; there
+   is no automatic approval. Owner updates retain the same ID and immediately
+   return previously approved decks to private pending review. Sharing after an
+   account change creates a new submission.
 4. Other users browse without signing in and download editable local copies,
    including images, audio, and sections. Study progress and source documents
    are never part of the shared payload.
@@ -40,17 +42,21 @@ All paths start with `/v1/community`.
 | POST | `/auth/apple` | Apple identity token, original nonce; returns session and profile |
 | GET | `/account` | Bearer session; current public profile |
 | PUT | `/account` | Bearer session; username and character choices |
-| GET | `/account/decks` | Bearer session; own published decks |
+| GET | `/account/decks` | Bearer session; own published, pending, and rejected decks |
 | DELETE | `/account` | Bearer session; removes account and public content |
-| GET | `/decks?q=&category=&offset=&limit=` | Public summaries and `nextOffset` |
+| GET | `/decks?q=&category=&offset=&limit=` | Public approved summaries and `nextOffset` |
 | POST | `/decks/drafts` | Bearer session; returns deck ID |
 | POST | `/decks/:id/media` | Owner; raw binary body and allowed Content-Type |
-| PUT | `/decks/:id` | Owner; metadata and complete card snapshot |
+| PUT/PATCH | `/decks/:id` | Owner; complete snapshot; HTTP 202 pending review |
 | GET | `/decks/:id/preview` | Public first five cards; does not increment downloads |
-| GET | `/decks/:id` | Public published snapshot; increments download requests |
-| GET/HEAD | `/media/:id` | Public if referenced by a published deck; otherwise owner |
+| GET | `/decks/:id` | Public approved published snapshot; increments download requests |
+| GET/HEAD | `/media/:id` | Public if referenced by an approved visible published deck; otherwise owner |
 | DELETE | `/decks/:id` | Owner; removes public copy |
 | POST | `/decks/:id/reports` | Signed-in user; JSON `reason` |
+
+Submission succeeds with HTTP 202 and `{ id, success: true, reviewStatus: "pending", submittedAt, message: "Review can take up to 3 days." }`. Owner deck summaries include optional `reviewStatus` (`pending`, `approved`, or `rejected`), `reviewMessage` (rejection reason or null), and `submittedAt` (epoch seconds or null). Resubmission clears an old rejection reason. Pending/rejected cards and referenced media remain private and are retained until removed by the owner/admin.
+
+The protected admin queue is `GET /v1/admin/reviews?status=pending`. Review decisions use `POST /v1/admin/decks/:id/review` with `decision: "approve" | "reject"`, `expectedRevision`, and a required rejection `reason` of 1–1000 characters. Approvals validate saved cards and attachments; stale decisions return 409. Both decisions are audited. Only trusted admin-created drafts can use direct publication. Existing public decks remain approved after migration 0008. Approval preserves any separate admin hide flag.
 
 Images: JPEG/PNG, 10 MiB each. Audio: MP3/M4A/WAV, 20 MiB each. Published
 decks: 1–500 cards, 100 MiB total unique media, 1,000 attachments. Published
@@ -59,7 +65,7 @@ Users can have 50 active shared decks and create at most 20 per day. JSON bodies
 are capped at 1 MiB. These limits apply server-side, including streamed uploads.
 
 Daily cleanup at 04:17 UTC expires sessions, removes abandoned drafts after
-24 hours, and deletes up to 500 removed or old unused media objects per run.
+24 hours (excluding submitted pending/rejected and admin-created drafts), and deletes up to 500 removed or old unused media objects per run.
 Reports are stored in `community_reports`; they are not automatically moderated.
 To inspect reports:
 

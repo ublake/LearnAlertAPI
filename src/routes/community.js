@@ -33,6 +33,8 @@ function deckResponse(row, detail = false) {
   return { id: row.id, name: row.name, description: row.description, authorHandle: row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
+    ...(row.review_status ? { reviewStatus: row.review_status } : {}),
+    reviewMessage: row.review_message ?? null, submittedAt: row.submitted_at ?? null,
     ...(detail ? { cards: JSON.parse(row.cards_json) } : {}) };
 }
 
@@ -97,8 +99,8 @@ async function handle(request, env) {
   if (path === '/v1/community/account/decks' && method === 'GET') {
     const user = await communityUser(request, env);
     const { results } = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
-      JOIN community_users u ON u.id=d.owner_id WHERE d.owner_id=? AND d.status='published'
-      ORDER BY d.published_at DESC,d.id DESC LIMIT 50`).bind(user.id).all();
+      JOIN community_users u ON u.id=d.owner_id WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected'))
+      ORDER BY COALESCE(d.submitted_at,d.published_at,d.created_at) DESC,d.id DESC LIMIT 50`).bind(user.id).all();
     return json({ decks: results.map(row => deckResponse(row)), nextOffset: null });
   }
 
@@ -148,7 +150,7 @@ async function handle(request, env) {
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
     const filter = `FROM community_decks d JOIN community_users u ON u.id=d.owner_id
-      WHERE d.status='published' AND (?='' OR d.category_tag=? COLLATE NOCASE)
+      WHERE d.status='published' AND d.review_status='approved' AND d.admin_hidden=0 AND (?='' OR d.category_tag=? COLLATE NOCASE)
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
     const parameters = [category, category, search, pattern, pattern, pattern];
     const [page, count] = await db.batch([
@@ -164,8 +166,8 @@ async function handle(request, env) {
     const user = await communityUser(request, env);
     const meta = deckMetadata(await readCommunityJSON(request));
     const id = crypto.randomUUID();
-    const result = await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,created_at,updated_at)
-      SELECT ?,?,?,?,?,?,?,?,? WHERE
+    const result = await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,created_at,updated_at,review_status)
+      SELECT ?,?,?,?,?,?,?,?,?,NULL WHERE
       (SELECT COUNT(*) FROM community_decks WHERE owner_id=? AND status!='deleted')<50 AND
       (SELECT COUNT(*) FROM community_decks WHERE owner_id=? AND created_at>?)<20`)
       .bind(id, user.id, meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, now(), now(), user.id, user.id, now() - 86400).run();
@@ -210,10 +212,10 @@ async function handle(request, env) {
   const mediaMatch = path.match(new RegExp(`^/v1/community/media/(${uuidPattern})$`));
   if (mediaMatch && (method === 'GET' || method === 'HEAD')) {
     requireStorage(env);
-    const row = await db.prepare(`SELECT m.*, d.owner_id,d.status FROM community_media m
+    const row = await db.prepare(`SELECT m.*, d.owner_id,d.status,d.admin_hidden,d.review_status FROM community_media m
       JOIN community_decks d ON d.id=m.deck_id WHERE m.id=? AND m.uploaded=1 AND m.deleting=0 AND d.status!='deleted'`).bind(mediaMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Attachment not found.');
-    if (row.status !== 'published' || !row.attached) {
+    if (row.status !== 'published' || row.review_status !== 'approved' || row.admin_hidden || !row.attached) {
       const user = await communityUser(request, env, false);
       if (!user || user.id !== row.owner_id) throw new CommunityError(404, 'Attachment not found.');
     }
@@ -233,8 +235,8 @@ async function handle(request, env) {
     const body = await readCommunityJSON(request);
     if (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.length > 1000) throw new CommunityError(400, 'Please give a reason for reporting this deck.');
     const result = await db.prepare(`INSERT INTO community_reports(deck_id,user_id,reason,created_at)
-      SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM community_decks WHERE id=? AND status='published')
-      ON CONFLICT(deck_id,user_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
+      SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM community_decks WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0)
+      ON CONFLICT(deck_id,user_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at,resolved_at=NULL,resolved_by=NULL`)
       .bind(reportMatch[1], user.id, body.reason.trim(), now(), reportMatch[1]).run();
     if (!result.meta.changes) throw new CommunityError(404, 'Deck not found.');
     return json({ success: true });
@@ -243,7 +245,7 @@ async function handle(request, env) {
   const previewMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/preview$`));
   if (previewMatch && method === 'GET') {
     const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
-      JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published'`).bind(previewMatch[1]).first();
+      JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(previewMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Deck not found.');
     const deck = deckResponse(row, true);
     deck.cards = deck.cards.slice(0, 5);
@@ -254,9 +256,9 @@ async function handle(request, env) {
   if (deckMatch) {
     const id = deckMatch[1];
     if (method === 'GET') {
-      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published'`).bind(id).first();
+      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(id).first();
       if (!row) throw new CommunityError(404, 'Deck not found.');
-      await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published'").bind(id).run();
+      await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0").bind(id).run();
       return json({ deck: deckResponse({ ...row, download_count: row.download_count + 1 }, true) });
     }
     const user = await communityUser(request, env);
@@ -272,18 +274,20 @@ async function handle(request, env) {
         publishedBytes += upload.byte_size;
       }
       if (publishedBytes > maxDeckBytes || media.size > 1000) throw new CommunityError(413, 'A shared deck can contain up to 100 MB of media and 1,000 attachments.');
-      const statements = [db.prepare('UPDATE community_media SET attached=0 WHERE deck_id=?').bind(id)];
+      const guard = "EXISTS(SELECT 1 FROM community_decks WHERE id=? AND owner_id=? AND status!='deleted')";
+      const statements = [db.prepare(`UPDATE community_media SET attached=0 WHERE deck_id=? AND ${guard}`).bind(id,id,user.id)];
       // Each prepared statement stays below D1's bind parameter limit.
       const mediaIDs = [...media.keys()];
       for (let start = 0; start < mediaIDs.length; start += 90) {
         const chunk = mediaIDs.slice(start, start + 90);
-        statements.push(db.prepare(`UPDATE community_media SET attached=1 WHERE deck_id=? AND id IN (${chunk.map(() => '?').join(',')})`).bind(id, ...chunk));
+        statements.push(db.prepare(`UPDATE community_media SET attached=1 WHERE deck_id=? AND id IN (${chunk.map(() => '?').join(',')}) AND ${guard}`).bind(id, ...chunk,id,user.id));
       }
-      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,status='published',published_at=COALESCE(published_at,?),updated_at=? WHERE id=? AND owner_id=? AND status!='deleted'`)
+      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,status='draft',review_status='pending',review_message=NULL,submitted_at=?,reviewed_at=NULL,reviewed_by=NULL,updated_at=? WHERE id=? AND owner_id=? AND status!='deleted'`)
         .bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, now(), now(), id, user.id));
       const results = await db.batch(statements);
       if (!results.at(-1).meta.changes) throw new CommunityError(409, 'This deck was removed while publishing.');
-      return json({ id, success: true });
+      const submitted = await db.prepare('SELECT submitted_at FROM community_decks WHERE id=? AND owner_id=?').bind(id,user.id).first();
+      return json({ id, success: true, reviewStatus: 'pending', submittedAt: submitted?.submitted_at ?? now(), message: 'Review can take up to 3 days.' }, 202);
     }
     if (method === 'DELETE') {
       await db.prepare("UPDATE community_decks SET status='deleted',updated_at=? WHERE id=? AND owner_id=?").bind(now(), id, user.id).run();
@@ -311,7 +315,7 @@ export async function cleanupCommunity(env) {
   const db = env.COMMUNITY_DB;
   await db.batch([
     db.prepare('DELETE FROM community_sessions WHERE expires_at<=?').bind(now()),
-    db.prepare("UPDATE community_decks SET status='deleted' WHERE status='draft' AND updated_at<?").bind(now() - 86400)
+    db.prepare("UPDATE community_decks SET status='deleted' WHERE status='draft' AND admin_created=0 AND COALESCE(review_status,'') NOT IN ('pending','rejected') AND updated_at<?").bind(now() - 86400)
   ]);
   const queued = await db.prepare('SELECT object_key FROM community_deleted_objects ORDER BY created_at LIMIT 500').all();
   for (const row of queued.results) {
