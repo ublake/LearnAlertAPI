@@ -5,6 +5,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'esbuild';
 import { verifyAppleIdentity, sha256 } from '../src/lib/communityAuth.js';
 import { cleanupCommunity } from '../src/routes/community.js';
+import { ensureCommunityUser, generatedCommunityHandle } from '../src/lib/communityHandles.js';
 import { readLimitedBody, validateCommunityDeck } from '../src/lib/communityValidation.js';
 
 const nonce = 'a'.repeat(64);
@@ -281,6 +282,7 @@ test('Apple sign-in restores a saved profile after its original generated userna
     assert.equal(firstResponse.status, 201);
     const first = await firstResponse.json();
     assert.equal(first.profile.isComplete, false);
+    assert.match(first.handle, /^@[a-z]+_[a-z]+$/);
     assert.deepEqual(first.profile.avatar, { hair: 0, eyes: 0, mouth: 0, skinTone: 3 });
     const updated = await mf.dispatchFetch('https://api.example.test/v1/community/account', { method: 'PUT', headers: { Authorization: `Bearer ${first.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 } }) });
     assert.equal(updated.status, 200);
@@ -321,8 +323,42 @@ test('community Popular and Recent sorting preserve search, filters and paginati
     assert.deepEqual(names(await list('')), names(await list('sort=recent')));
     assert.deepEqual(names(await list('sort=invalid')), names(await list('sort=recent')));
     const first = await list('sort=popular&category=Science&limit=1');
-    assert.deepEqual(names(first), ['Newer popular']); assert.equal(first.nextOffset, 1);
+    assert.deepEqual(names(first), ['Newer popular']); assert.equal(first.nextOffset, 1); assert.equal(first.totalCount, 3);
     assert.deepEqual(names(await list(`sort=popular&category=Science&limit=1&offset=${first.nextOffset}`)), ['Older popular']);
-    assert.deepEqual(names(await list('sort=recent&category=Science&q=popular')), ['Newer popular', 'Older popular']);
+    const searched = await list('sort=recent&category=Science&q=popular');
+    assert.deepEqual(names(searched), ['Newer popular', 'Older popular']); assert.equal(searched.totalCount, 2);
+    const beyond = await list('sort=popular&offset=100');
+    assert.deepEqual(beyond.decks, []); assert.equal(beyond.totalCount, 4);
+    const noResults = await list('q=does-not-exist');
+    assert.equal(noResults.totalCount, 0); assert.equal(noResults.nextOffset, null);
+  } finally { await mf.dispose(); }
+});
+
+
+test('generated usernames retry collisions atomically and preserve completed profiles', async () => {
+  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: 'export default {fetch(){return new Response("OK")}}', compatibilityDate: '2026-09-04', d1Databases: ['COMMUNITY_DB'] }));
+  try {
+    const db = await mf.getD1Database('COMMUNITY_DB');
+    await applyCommunityMigrations(db);
+    await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('reserved', '@Cozy_Otter', 1).run();
+    const fresh = await ensureCommunityUser(db, 'fresh', 2, attempt => attempt === 0 ? '@cozy_otter' : '@sunny_mango');
+    assert.equal(fresh.handle, '@sunny_mango');
+    await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('legacy', '@learner_0123456789abcdef', 1).run();
+    const upgraded = await ensureCommunityUser(db, 'legacy', 2, () => '@bouncy_bean');
+    assert.equal(upgraded.handle, '@bouncy_bean');
+    await db.prepare('INSERT INTO community_users(id,handle,created_at,profile_completed) VALUES(?,?,?,?)').bind('completed', '@learner_abcdef0123456789', 1, 1).run();
+    assert.equal((await ensureCommunityUser(db, 'completed', 2, () => '@never_changed')).handle, '@learner_abcdef0123456789');
+    const concurrent = await Promise.all([
+      ensureCommunityUser(db, 'same-apple-user', 2, () => '@happy_panda'),
+      ensureCommunityUser(db, 'same-apple-user', 2, () => '@tiny_mochi')
+    ]);
+    assert.equal(concurrent[0].handle, concurrent[1].handle);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM community_users WHERE id='same-apple-user'").first()).n, 1);
+    await assert.rejects(ensureCommunityUser(db, 'full', 2, () => '@COZY_OTTER'), error => error.status === 503);
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const name = generatedCommunityHandle(attempt);
+      assert.match(name, attempt < 16 ? /^@[a-z]+_[a-z]+$/ : /^@[a-z]+_[a-z]+[0-9]{2}$/);
+      assert.ok(name.length <= 25);
+    }
   } finally { await mf.dispose(); }
 });

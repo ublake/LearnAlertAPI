@@ -1,3 +1,4 @@
+import { ensureCommunityUser } from '../lib/communityHandles.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity } from '../lib/communityAuth.js';
@@ -123,14 +124,11 @@ async function handle(request, env) {
       throw new CommunityError(400, 'Invalid sign-in request.');
     }
     const id = await verifyAppleIdentity(body.identityToken, body.nonce, env.APPLE_CLIENT_ID || 'com.learnalert.app');
-    const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-    const requested = typeof body.givenName === 'string' ? body.givenName.toLowerCase().replace(/[^a-z]/g, '').slice(0, 7) : '';
-    const handle = `@${requested || 'learner'}_${suffix}`;
+    await ensureCommunityUser(db, id, now());
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const token = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
     const expiresAt = now() + 30 * 86400;
     await db.batch([
-      db.prepare('INSERT INTO community_users(id,handle,created_at) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM community_users WHERE id=?) ON CONFLICT(id) DO NOTHING').bind(id, handle, now(), id),
       db.prepare('DELETE FROM community_sessions WHERE user_id=? AND expires_at<=?').bind(id, now()),
       db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await sha256(token), id, expiresAt)
     ]);
@@ -149,12 +147,17 @@ async function handle(request, env) {
       : 'd.published_at DESC, d.id DESC';
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
-    const { results } = await db.prepare(`SELECT d.*, u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id
+    const filter = `FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.status='published' AND (?='' OR d.category_tag=? COLLATE NOCASE)
-      AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')
-      ORDER BY ${order} LIMIT ? OFFSET ?`)
-      .bind(category, category, search, pattern, pattern, pattern, limit + 1, offset).all();
-    return json({ decks: results.slice(0, limit).map(row => deckResponse(row)), nextOffset: results.length > limit ? offset + limit : null });
+      AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
+    const parameters = [category, category, search, pattern, pattern, pattern];
+    const [page, count] = await db.batch([
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
+        .bind(...parameters, limit + 1, offset),
+      db.prepare(`SELECT COUNT(*) AS total ${filter}`).bind(...parameters)
+    ]);
+    return json({ decks: page.results.slice(0, limit).map(row => deckResponse(row)),
+      nextOffset: page.results.length > limit ? offset + limit : null, totalCount: count.results[0].total });
   }
 
   if (path === '/v1/community/decks/drafts' && method === 'POST') {
