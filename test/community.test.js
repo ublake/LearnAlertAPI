@@ -77,10 +77,24 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     const profile = { username: 'Funny_Buddy', avatar: { hair: 5, eyes: 4, mouth: 3 } };
     assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
     assert.deepEqual(await (await request('account', 'GET', undefined, ownerToken)).json(), {
-      handle: '@funny_buddy', avatar: profile.avatar, isComplete: true
+      handle: '@funny_buddy', avatar: { ...profile.avatar, skinTone: 3 }, isComplete: true
     });
     assert.equal((await request('account', 'PUT', { ...profile, username: '@FUNNY_BUDDY' }, otherToken)).status, 409);
     assert.equal((await request('account', 'GET', undefined, otherToken)).status, 200);
+    assert.equal((await request('account', 'PUT', { ...profile, username: 'different_name' }, ownerToken)).status, 409);
+    for (const skinTone of [-1, 7, 2.5, null, '3']) {
+      assert.equal((await request('account', 'PUT', { ...profile, avatar: { ...profile.avatar, skinTone } }, ownerToken)).status, 400);
+    }
+    profile.avatar.skinTone = 6;
+    assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
+    const legacyAvatar = { hair: profile.avatar.hair, eyes: profile.avatar.eyes, mouth: profile.avatar.mouth };
+    assert.equal((await request('account', 'PUT', { username: profile.username, avatar: legacyAvatar }, ownerToken)).status, 200);
+    assert.deepEqual((await (await request('account', 'GET', undefined, ownerToken)).json()).avatar, profile.avatar);
+    const concurrentSetups = await Promise.all(['first_choice', 'second_choice'].map(username =>
+      request('account', 'PUT', { username, avatar: legacyAvatar }, otherToken)));
+    assert.deepEqual(concurrentSetups.map(response => response.status).sort(), [200, 409]);
+    const winner = await concurrentSetups.find(response => response.status === 200).json();
+    assert.equal((await (await request('account', 'GET', undefined, otherToken)).json()).handle, winner.handle);
     assert.equal((await request('decks/drafts', 'POST', { name: 'Unauthorized' })).status, 401);
     const draft = await request('decks/drafts', 'POST', { name: 'Images and audio', categoryTag: 'Science' }, ownerToken);
     assert.equal(draft.status, 201);
@@ -242,15 +256,15 @@ test('Apple sign-in restores a saved profile after its original generated userna
     assert.equal(firstResponse.status, 201);
     const first = await firstResponse.json();
     assert.equal(first.profile.isComplete, false);
-    assert.deepEqual(first.profile.avatar, { hair: 0, eyes: 0, mouth: 0 });
-    const updated = await mf.dispatchFetch('https://api.example.test/v1/community/account', { method: 'PUT', headers: { Authorization: `Bearer ${first.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5 } }) });
+    assert.deepEqual(first.profile.avatar, { hair: 0, eyes: 0, mouth: 0, skinTone: 3 });
+    const updated = await mf.dispatchFetch('https://api.example.test/v1/community/account', { method: 'PUT', headers: { Authorization: `Bearer ${first.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 } }) });
     assert.equal(updated.status, 200);
     await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('another-account', first.handle, 1).run();
     const secondResponse = await signIn();
     assert.equal(secondResponse.status, 201);
     const second = await secondResponse.json();
     assert.equal(second.handle, '@funny_buddy');
-    assert.deepEqual(second.profile, { handle: '@funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5 }, isComplete: true });
+    assert.deepEqual(second.profile, { handle: '@funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 }, isComplete: true });
     assert.notEqual(second.token, first.token);
     const restored = await mf.dispatchFetch('https://api.example.test/v1/community/account', { headers: { Authorization: `Bearer ${second.token}` } });
     assert.deepEqual(await restored.json(), second.profile);

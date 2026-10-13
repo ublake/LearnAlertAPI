@@ -15,8 +15,14 @@ async function ownedDeck(env, id, user) {
   return deck;
 }
 function avatarResponse(row) {
-  try { return JSON.parse(row.avatar_json || '{"hair":0,"eyes":0,"mouth":0}'); }
-  catch { return { hair: 0, eyes: 0, mouth: 0 }; }
+  let stored;
+  try { stored = JSON.parse(row.avatar_json || '{}'); } catch { stored = {}; }
+  const avatar = {};
+  for (const [part, maximum] of Object.entries({ hair: 5, eyes: 5, mouth: 5, skinTone: 6 })) {
+    const value = stored?.[part];
+    avatar[part] = Number.isInteger(value) && value >= 0 && value <= maximum ? value : part === 'skinTone' ? 3 : 0;
+  }
+  return avatar;
 }
 function profileResponse(row) {
   return { handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
@@ -62,19 +68,27 @@ async function handle(request, env) {
   if (path === '/v1/community/account' && (method === 'GET' || method === 'PUT')) {
     const user = await communityUser(request, env);
     if (method === 'PUT') {
-      const profile = validateCommunityProfile(await readCommunityJSON(request));
+      const body = await readCommunityJSON(request);
+      const profile = validateCommunityProfile(body);
       const taken = await db.prepare('SELECT id FROM community_users WHERE handle=? COLLATE NOCASE AND id!=?')
         .bind(profile.handle, user.id).first();
       if (taken) throw new CommunityError(409, 'That username is taken. Try another one.');
       try {
-        await db.prepare('UPDATE community_users SET handle=?,avatar_json=?,profile_completed=1 WHERE id=?')
-          .bind(profile.handle, JSON.stringify(profile.avatar), user.id).run();
+        // The first setup wins atomically, including simultaneous saves from two devices.
+        // Legacy clients omit skinTone; keep the current saved tone when they edit a character.
+        const avatarJSON = JSON.stringify(profile.avatar);
+        const result = await db.prepare(`UPDATE community_users SET handle=?,
+          avatar_json=CASE WHEN ? THEN ? ELSE json_set(?, '$.skinTone', COALESCE(json_extract(avatar_json,'$.skinTone'),3)) END,
+          profile_completed=1 WHERE id=? AND (profile_completed=0 OR handle=? COLLATE NOCASE)`)
+          .bind(profile.handle, body.avatar.skinTone !== undefined ? 1 : 0, avatarJSON, avatarJSON, user.id, profile.handle).run();
+        if (!result.meta.changes) throw new CommunityError(409, 'Your username is permanent. You can still change your character.');
       } catch (error) {
         if (String(error.message).includes('UNIQUE constraint failed')) throw new CommunityError(409, 'That username is taken. Try another one.');
         throw error;
       }
     }
     const row = await db.prepare('SELECT handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(user.id).first();
+    if (!row) throw new CommunityError(401, 'Please sign in with Apple again.');
     return json(profileResponse(row));
   }
 

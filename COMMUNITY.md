@@ -118,9 +118,16 @@ Apply migration 0003 before deploying these account controls.
 Apply migration 0004 before deploying the profile endpoints. Usernames are
 case-insensitive and unique, normalized to lowercase, and use 3–24 ASCII letters,
 numbers, or underscores with a letter first. PUT `/account` accepts
-`{"username":"funny_buddy","avatar":{"hair":2,"eyes":4,"mouth":5}}`.
-Each character part is an integer from 0 to 5; arbitrary photo uploads are not
-part of the profile feature. The response is `handle`, `avatar`, and `isComplete`.
+`{"username":"funny_buddy","avatar":{"hair":2,"eyes":4,"mouth":5,"skinTone":3}}`.
+Hair, eyes, and mouth are integers from 0 to 5. Skin tone is an integer from
+0 to 6 and defaults to the middle shade (3). Legacy clients that omit skin tone
+preserve the saved shade. Arbitrary photo uploads are not part of the profile feature. The response is `handle`, `avatar`, and `isComplete`.
 Apple sign-in returns the existing profile, and public deck responses expose
 `authorHandle` and `authorAvatar` without exposing the Apple identity or session.
 Existing accounts receive a default character and can finish setup in Settings.
+
+The first successful profile save permanently locks the username for that account.
+Later saves can update the character with the same username, and simultaneous
+first saves cannot overwrite each other. Sign-out and sign-in restore the saved
+profile without reopening setup; Settings still opens the character editor manually.
+Account deletion continues to remove the profile and release its username.

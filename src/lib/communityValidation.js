@@ -147,5 +147,10 @@ export function validateCommunityProfile(body) {
     }
     avatar[part] = value;
   }
+  const skinTone = body.avatar?.skinTone === undefined ? 3 : body.avatar.skinTone;
+  if (!Number.isInteger(skinTone) || skinTone < 0 || skinTone > 6) {
+    throw new CommunityError(400, 'Choose a valid skin tone.');
+  }
+  avatar.skinTone = skinTone;
   return { handle: `@${username}`, avatar };
 }
