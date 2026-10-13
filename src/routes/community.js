@@ -143,12 +143,16 @@ async function handle(request, env) {
     const offset = Math.min(100000, Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
     const search = (url.searchParams.get('q') || '').trim().slice(0, 120);
     const category = (url.searchParams.get('category') || '').trim().slice(0, 60);
+    // Only fixed sort clauses enter SQL; older clients retain the recent-first default.
+    const order = url.searchParams.get('sort') === 'popular'
+      ? 'd.download_count DESC, d.published_at DESC, d.id DESC'
+      : 'd.published_at DESC, d.id DESC';
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
     const { results } = await db.prepare(`SELECT d.*, u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.status='published' AND (?='' OR d.category_tag=? COLLATE NOCASE)
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')
-      ORDER BY d.published_at DESC, d.id DESC LIMIT ? OFFSET ?`)
+      ORDER BY ${order} LIMIT ? OFFSET ?`)
       .bind(category, category, search, pattern, pattern, pattern, limit + 1, offset).all();
     return json({ decks: results.slice(0, limit).map(row => deckResponse(row)), nextOffset: results.length > limit ? offset + limit : null });
   }

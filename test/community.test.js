@@ -295,3 +295,34 @@ test('Apple sign-in restores a saved profile after its original generated userna
     assert.deepEqual(await restored.json(), second.profile);
   } finally { await mf.dispose(); }
 });
+
+
+test('community Popular and Recent sorting preserve search, filters and pagination', async () => {
+  const bundle = await build({ entryPoints: ['src/index.js'], bundle: true, write: false, format: 'esm', platform: 'browser' });
+  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-04', d1Databases: ['COMMUNITY_DB'] }));
+  try {
+    const db = await mf.getD1Database('COMMUNITY_DB');
+    await applyCommunityMigrations(db);
+    await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('sort-owner', '@sort_owner', 1).run();
+    for (const [name, category, date, downloads, status] of [
+      ['Older popular', 'Science', 100, 20, 'published'],
+      ['Newer popular', 'Science', 200, 20, 'published'],
+      ['Newest deck', 'Science', 300, 1, 'published'],
+      ['Language favorite', 'Languages', 150, 40, 'published'],
+      ['Hidden draft', 'Science', 500, 90, 'draft']
+    ]) {
+      await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,cards_json,card_count,download_count,status,published_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), 'sort-owner', name, '', category, '#4868F8', 'Quiz', '[]', 0, downloads, status, date, date, date).run();
+    }
+    async function list(query) { return (await mf.dispatchFetch(`https://api.example.test/v1/community/decks?${query}`)).json(); }
+    const names = page => page.decks.map(deck => deck.name);
+    assert.deepEqual(names(await list('sort=popular')), ['Language favorite', 'Newer popular', 'Older popular', 'Newest deck']);
+    assert.deepEqual(names(await list('sort=recent')), ['Newest deck', 'Newer popular', 'Language favorite', 'Older popular']);
+    assert.deepEqual(names(await list('')), names(await list('sort=recent')));
+    assert.deepEqual(names(await list('sort=invalid')), names(await list('sort=recent')));
+    const first = await list('sort=popular&category=Science&limit=1');
+    assert.deepEqual(names(first), ['Newer popular']); assert.equal(first.nextOffset, 1);
+    assert.deepEqual(names(await list(`sort=popular&category=Science&limit=1&offset=${first.nextOffset}`)), ['Older popular']);
+    assert.deepEqual(names(await list('sort=recent&category=Science&q=popular')), ['Newer popular', 'Older popular']);
+  } finally { await mf.dispose(); }
+});
