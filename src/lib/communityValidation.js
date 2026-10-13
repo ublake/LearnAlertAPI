@@ -130,3 +130,22 @@ export function validateMedia(bytes, contentType) {
   );
   if (!valid) throw new CommunityError(400, 'The file does not match its image or audio format.');
 }
+
+export function validateCommunityProfile(body) {
+  if (!body || typeof body !== 'object' || typeof body.username !== 'string') {
+    throw new CommunityError(400, 'Choose a username.');
+  }
+  const username = body.username.trim().replace(/^@/, '').toLowerCase();
+  if (!/^[a-z][a-z0-9_]{2,23}$/.test(username)) {
+    throw new CommunityError(400, 'Use 3–24 letters, numbers or underscores, starting with a letter.');
+  }
+  const avatar = {};
+  for (const part of ['hair', 'eyes', 'mouth']) {
+    const value = body.avatar?.[part];
+    if (!Number.isInteger(value) || value < 0 || value > 5) {
+      throw new CommunityError(400, 'Choose a valid character.');
+    }
+    avatar[part] = value;
+  }
+  return { handle: `@${username}`, avatar };
+}

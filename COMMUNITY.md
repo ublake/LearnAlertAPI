@@ -13,13 +13,16 @@ checks that an attachment belongs to a published deck before serving it.
 
 1. Create cards in a personal deck. Attach question/answer images and an optional
    MP3, M4A, or WAV question clip using the card editor.
-2. Open Premade Decks → User-Made Decks → Share Deck and sign in with Apple.
+2. Open Discover → Community decks → Share. Sign in with Apple when publishing,
+   or use the profile card at the top of Settings. Choose a username and character.
 3. Choose a deck, category, and description. Publishing uploads a draft's media
-   and then atomically publishes its card snapshot. Updates retain the public ID.
+   and then atomically publishes its card snapshot. Updates retain the public ID for the same owner. Sharing after an account
+   change creates a new publication.
 4. Other users browse without signing in and download editable local copies,
    including images, audio, and sections. Study progress and source documents
    are never part of the shared payload.
-5. The owner can update or remove the public copy through Share Deck. Removal
+5. The owner can update or remove the public copy in Settings → profile →
+   My shared decks. Removal
    immediately blocks API access; existing downloaded copies remain local.
 
 The app entitlement includes Sign in with Apple for `com.learnalert.app`. A
@@ -34,11 +37,16 @@ All paths start with `/v1/community`.
 
 | Method | Path | Access |
 | --- | --- | --- |
-| POST | `/auth/apple` | Apple identity token, original nonce, optional given name |
+| POST | `/auth/apple` | Apple identity token, original nonce; returns session and profile |
+| GET | `/account` | Bearer session; current public profile |
+| PUT | `/account` | Bearer session; username and character choices |
+| GET | `/account/decks` | Bearer session; own published decks |
+| DELETE | `/account` | Bearer session; removes account and public content |
 | GET | `/decks?q=&category=&offset=&limit=` | Public summaries and `nextOffset` |
 | POST | `/decks/drafts` | Bearer session; returns deck ID |
 | POST | `/decks/:id/media` | Owner; raw binary body and allowed Content-Type |
 | PUT | `/decks/:id` | Owner; metadata and complete card snapshot |
+| GET | `/decks/:id/preview` | Public first five cards; does not increment downloads |
 | GET | `/decks/:id` | Public published snapshot; increments download requests |
 | GET/HEAD | `/media/:id` | Public if referenced by a published deck; otherwise owner |
 | DELETE | `/decks/:id` | Owner; removes public copy |
@@ -100,7 +108,19 @@ The administrator endpoints return 404 without a valid moderator credential.
 
 `DELETE /v1/community/account` requires the user's session. It atomically deletes
 that user's community profile, sessions, reports, and public decks, queuing media
-for cleanup. The app exposes this action in Share a Deck's account menu. Personal
+for cleanup. The app exposes this action in Settings → profile → account menu. Personal
 library copies are retained, and previously downloaded public copies cannot be
 remotely erased. A new Apple sign-in may create a new profile afterward.
 Apply migration 0003 before deploying these account controls.
+
+## Public profiles
+
+Apply migration 0004 before deploying the profile endpoints. Usernames are
+case-insensitive and unique, normalized to lowercase, and use 3–24 ASCII letters,
+numbers, or underscores with a letter first. PUT `/account` accepts
+`{"username":"funny_buddy","avatar":{"hair":2,"eyes":4,"mouth":5}}`.
+Each character part is an integer from 0 to 5; arbitrary photo uploads are not
+part of the profile feature. The response is `handle`, `avatar`, and `isComplete`.
+Apple sign-in returns the existing profile, and public deck responses expose
+`authorHandle` and `authorAvatar` without exposing the Apple identity or session.
+Existing accounts receive a default character and can finish setup in Settings.

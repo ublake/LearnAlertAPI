@@ -10,6 +10,16 @@ import { readLimitedBody, validateCommunityDeck } from '../src/lib/communityVali
 const nonce = 'a'.repeat(64);
 const toBase64URL = value => Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url');
 
+async function applyCommunityMigrations(db) {
+  for (const file of (await readdir(new URL('../community-migrations/', import.meta.url))).sort()) {
+      const sql = await readFile(new URL(`../community-migrations/${file}`, import.meta.url), 'utf8');
+      const triggers = sql.match(/CREATE TRIGGER[\s\S]*?END;/g) ?? [];
+      const remaining = sql.replace(/CREATE TRIGGER[\s\S]*?END;/g, '');
+      for (const statement of remaining.split(';').map(item => item.trim()).filter(Boolean)) await db.prepare(statement).run();
+      for (const trigger of triggers) await db.prepare(trigger).run();
+    }
+}
+
 test('Apple identity verification rejects incorrect audience, nonce, expiry, and forged signatures', async () => {
   const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
   const jwk = { ...await crypto.subtle.exportKey('jwk', pair.publicKey), kid: 'test-key', alg: 'RS256' };
@@ -47,17 +57,11 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-04', d1Databases: ['COMMUNITY_DB'], r2Buckets: ['DECK_ASSETS'], bindings: { API_KEY: 'ai-secret', COMMUNITY_MODERATION_TOKEN: 'moderator-test' } }));
   try {
     const db = await mf.getD1Database('COMMUNITY_DB');
-    for (const file of (await readdir(new URL('../community-migrations/', import.meta.url))).sort()) {
-      const sql = await readFile(new URL(`../community-migrations/${file}`, import.meta.url), 'utf8');
-      const triggers = sql.match(/CREATE TRIGGER[\s\S]*?END;/g) ?? [];
-      const remaining = sql.replace(/CREATE TRIGGER[\s\S]*?END;/g, '');
-      for (const statement of remaining.split(';').map(item => item.trim()).filter(Boolean)) await db.prepare(statement).run();
-      for (const trigger of triggers) await db.prepare(trigger).run();
-    }
+    await applyCommunityMigrations(db);
     const ownerToken = 'b'.repeat(64);
     const otherToken = 'c'.repeat(64);
     for (const [id, token] of [['owner', ownerToken], ['other', otherToken]]) {
-      await db.prepare('INSERT INTO community_users VALUES(?,?,?)').bind(id, `@${id}`, 1).run();
+      await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind(id, `@${id}`, 1).run();
       await db.prepare('INSERT INTO community_sessions VALUES(?,?,?)').bind(await sha256(token), id, Math.floor(Date.now() / 1000) + 3600).run();
     }
     async function request(path, method = 'GET', body, token) {
@@ -66,6 +70,17 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
       if (body && !(body instanceof Uint8Array)) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
       return mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers, body });
     }
+    assert.equal((await request('account')).status, 401);
+    assert.equal((await request('account/decks')).status, 401);
+    assert.equal((await request('account', 'PUT', { username: 'hi', avatar: { hair: 0, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
+    assert.equal((await request('account', 'PUT', { username: 'buddy', avatar: { hair: 9, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
+    const profile = { username: 'Funny_Buddy', avatar: { hair: 5, eyes: 4, mouth: 3 } };
+    assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
+    assert.deepEqual(await (await request('account', 'GET', undefined, ownerToken)).json(), {
+      handle: '@funny_buddy', avatar: profile.avatar, isComplete: true
+    });
+    assert.equal((await request('account', 'PUT', { ...profile, username: '@FUNNY_BUDDY' }, otherToken)).status, 409);
+    assert.equal((await request('account', 'GET', undefined, otherToken)).status, 200);
     assert.equal((await request('decks/drafts', 'POST', { name: 'Unauthorized' })).status, 401);
     const draft = await request('decks/drafts', 'POST', { name: 'Images and audio', categoryTag: 'Science' }, ownerToken);
     assert.equal(draft.status, 201);
@@ -102,6 +117,15 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     const listing = await (await request('decks?category=Science&q=Images')).json();
     assert.equal(listing.decks.length, 1);
     assert.equal(listing.decks[0].cards, undefined);
+    assert.equal(listing.decks[0].authorHandle, '@funny_buddy');
+    assert.deepEqual(listing.decks[0].authorAvatar, profile.avatar);
+    const mine = await (await request('account/decks', 'GET', undefined, ownerToken)).json();
+    assert.equal(mine.decks.length, 1);
+    assert.equal((await (await request('account/decks', 'GET', undefined, otherToken)).json()).decks.length, 0);
+    const preview = await (await request(`decks/${id}/preview`)).json();
+    assert.equal(preview.deck.downloadCount, 0);
+    assert.equal(preview.deck.cards[0].promptImageID, imageID);
+    assert.equal((await db.prepare('SELECT download_count AS count FROM community_decks WHERE id=?').bind(id).first()).count, 0);
     const detail = await (await request(`decks/${id}`)).json();
     assert.equal(detail.deck.cards[0].promptAudioID, audioID);
     assert.equal(detail.deck.cards[0].promptImageID, imageID);
@@ -192,5 +216,43 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.ok((await db.prepare('SELECT COUNT(*) AS count FROM community_deleted_objects').first()).count > 0);
     await cleanupCommunity({ COMMUNITY_DB: db, DECK_ASSETS: bucket });
     assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM community_deleted_objects').first()).count, 0);
+  } finally { await mf.dispose(); }
+});
+
+
+test('Apple sign-in restores a saved profile after its original generated username is reused', async () => {
+  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+  const jwk = { ...await crypto.subtle.exportKey('jwk', pair.publicKey), kid: 'profile-sign-in-test', alg: 'RS256' };
+  const claims = { iss: 'https://appleid.apple.com', aud: 'com.learnalert.app', sub: 'profile-account-test', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 300, nonce: await sha256(nonce) };
+  const message = `${toBase64URL({ kid: jwk.kid, alg: 'RS256' })}.${toBase64URL(claims)}`;
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(message));
+  const identityToken = `${message}.${Buffer.from(signature).toString('base64url')}`;
+  const bundle = await build({ entryPoints: ['src/index.js'], bundle: true, write: false, format: 'esm', platform: 'browser' });
+  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-04', d1Databases: ['COMMUNITY_DB'], r2Buckets: ['DECK_ASSETS'],
+    outboundService: request => {
+      assert.equal(request.url, 'https://appleid.apple.com/auth/keys');
+      return new Response(JSON.stringify({ keys: [jwk] }), { headers: { 'Content-Type': 'application/json' } });
+    }
+  }));
+  try {
+    const db = await mf.getD1Database('COMMUNITY_DB');
+    await applyCommunityMigrations(db);
+    const signIn = () => mf.dispatchFetch('https://api.example.test/v1/community/auth/apple', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identityToken, nonce }) });
+    const firstResponse = await signIn();
+    assert.equal(firstResponse.status, 201);
+    const first = await firstResponse.json();
+    assert.equal(first.profile.isComplete, false);
+    assert.deepEqual(first.profile.avatar, { hair: 0, eyes: 0, mouth: 0 });
+    const updated = await mf.dispatchFetch('https://api.example.test/v1/community/account', { method: 'PUT', headers: { Authorization: `Bearer ${first.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5 } }) });
+    assert.equal(updated.status, 200);
+    await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('another-account', first.handle, 1).run();
+    const secondResponse = await signIn();
+    assert.equal(secondResponse.status, 201);
+    const second = await secondResponse.json();
+    assert.equal(second.handle, '@funny_buddy');
+    assert.deepEqual(second.profile, { handle: '@funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5 }, isComplete: true });
+    assert.notEqual(second.token, first.token);
+    const restored = await mf.dispatchFetch('https://api.example.test/v1/community/account', { headers: { Authorization: `Bearer ${second.token}` } });
+    assert.deepEqual(await restored.json(), second.profile);
   } finally { await mf.dispose(); }
 });

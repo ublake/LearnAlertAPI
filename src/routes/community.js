@@ -1,6 +1,6 @@
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity } from '../lib/communityAuth.js';
-import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, MEDIA_TYPES, validateMedia } from '../lib/communityValidation.js';
+import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, MEDIA_TYPES, validateMedia, validateCommunityProfile } from '../lib/communityValidation.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const uuidPattern = '[a-fA-F0-9-]{36}';
@@ -14,9 +14,16 @@ async function ownedDeck(env, id, user) {
   if (!deck) throw new CommunityError(404, 'Deck not found.');
   return deck;
 }
+function avatarResponse(row) {
+  try { return JSON.parse(row.avatar_json || '{"hair":0,"eyes":0,"mouth":0}'); }
+  catch { return { hair: 0, eyes: 0, mouth: 0 }; }
+}
+function profileResponse(row) {
+  return { handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
+}
 function deckResponse(row, detail = false) {
   return { id: row.id, name: row.name, description: row.description, authorHandle: row.handle,
-    categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
+    authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
     ...(detail ? { cards: JSON.parse(row.cards_json) } : {}) };
 }
@@ -52,6 +59,33 @@ async function handle(request, env) {
     throw new CommunityError(404, 'Endpoint not found.');
   }
 
+  if (path === '/v1/community/account' && (method === 'GET' || method === 'PUT')) {
+    const user = await communityUser(request, env);
+    if (method === 'PUT') {
+      const profile = validateCommunityProfile(await readCommunityJSON(request));
+      const taken = await db.prepare('SELECT id FROM community_users WHERE handle=? COLLATE NOCASE AND id!=?')
+        .bind(profile.handle, user.id).first();
+      if (taken) throw new CommunityError(409, 'That username is taken. Try another one.');
+      try {
+        await db.prepare('UPDATE community_users SET handle=?,avatar_json=?,profile_completed=1 WHERE id=?')
+          .bind(profile.handle, JSON.stringify(profile.avatar), user.id).run();
+      } catch (error) {
+        if (String(error.message).includes('UNIQUE constraint failed')) throw new CommunityError(409, 'That username is taken. Try another one.');
+        throw error;
+      }
+    }
+    const row = await db.prepare('SELECT handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(user.id).first();
+    return json(profileResponse(row));
+  }
+
+  if (path === '/v1/community/account/decks' && method === 'GET') {
+    const user = await communityUser(request, env);
+    const { results } = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
+      JOIN community_users u ON u.id=d.owner_id WHERE d.owner_id=? AND d.status='published'
+      ORDER BY d.published_at DESC,d.id DESC LIMIT 50`).bind(user.id).all();
+    return json({ decks: results.map(row => deckResponse(row)), nextOffset: null });
+  }
+
   if (path === '/v1/community/account' && method === 'DELETE') {
     const user = await communityUser(request, env);
     // Preserve object keys in a deletion queue before cascading their SQL rows.
@@ -74,19 +108,19 @@ async function handle(request, env) {
       throw new CommunityError(400, 'Invalid sign-in request.');
     }
     const id = await verifyAppleIdentity(body.identityToken, body.nonce, env.APPLE_CLIENT_ID || 'com.learnalert.app');
-    const suffix = (await sha256(id)).slice(0, 8);
-    const requested = typeof body.givenName === 'string' ? body.givenName.toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 20) : '';
+    const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    const requested = typeof body.givenName === 'string' ? body.givenName.toLowerCase().replace(/[^a-z]/g, '').slice(0, 7) : '';
     const handle = `@${requested || 'learner'}_${suffix}`;
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const token = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
     const expiresAt = now() + 30 * 86400;
     await db.batch([
-      db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING').bind(id, handle, now()),
+      db.prepare('INSERT INTO community_users(id,handle,created_at) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM community_users WHERE id=?) ON CONFLICT(id) DO NOTHING').bind(id, handle, now(), id),
       db.prepare('DELETE FROM community_sessions WHERE user_id=? AND expires_at<=?').bind(id, now()),
       db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await sha256(token), id, expiresAt)
     ]);
-    const user = await db.prepare('SELECT handle FROM community_users WHERE id=?').bind(id).first();
-    return json({ token, expiresAt, handle: user.handle }, 201);
+    const user = await db.prepare('SELECT handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(id).first();
+    return json({ token, expiresAt, handle: user.handle, profile: profileResponse(user) }, 201);
   }
 
   if (path === '/v1/community/decks' && method === 'GET') {
@@ -96,7 +130,7 @@ async function handle(request, env) {
     const category = (url.searchParams.get('category') || '').trim().slice(0, 60);
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
-    const { results } = await db.prepare(`SELECT d.*, u.handle FROM community_decks d JOIN community_users u ON u.id=d.owner_id
+    const { results } = await db.prepare(`SELECT d.*, u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.status='published' AND (?='' OR d.category_tag=? COLLATE NOCASE)
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')
       ORDER BY d.published_at DESC, d.id DESC LIMIT ? OFFSET ?`)
@@ -184,11 +218,21 @@ async function handle(request, env) {
     return json({ success: true });
   }
 
+  const previewMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/preview$`));
+  if (previewMatch && method === 'GET') {
+    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
+      JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published'`).bind(previewMatch[1]).first();
+    if (!row) throw new CommunityError(404, 'Deck not found.');
+    const deck = deckResponse(row, true);
+    deck.cards = deck.cards.slice(0, 5);
+    return json({ deck });
+  }
+
   const deckMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})$`));
   if (deckMatch) {
     const id = deckMatch[1];
     if (method === 'GET') {
-      const row = await db.prepare(`SELECT d.*,u.handle FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published'`).bind(id).first();
+      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published'`).bind(id).first();
       if (!row) throw new CommunityError(404, 'Deck not found.');
       await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published'").bind(id).run();
       return json({ deck: deckResponse({ ...row, download_count: row.download_count + 1 }, true) });
