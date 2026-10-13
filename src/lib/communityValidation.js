@@ -53,6 +53,9 @@ function mediaID(value) {
 
 export function deckMetadata(body) {
   if (!body || typeof body !== 'object') throw new CommunityError(400, 'Invalid deck.');
+  if ((body.origin !== undefined && body.origin !== 'personal') || body.sourceCommunityID || body.sourcePremadeID || String(body.deckType).toLowerCase() === 'course') {
+    throw new CommunityError(403, 'Share a deck you created. Built-in and downloaded community decks can’t be republished.');
+  }
   const colorHex = text(body.colorHex ?? '#5B70E0', 7, 'Deck color');
   if (!/^#[0-9a-f]{6}$/i.test(colorHex)) throw new CommunityError(400, 'Invalid deck color.');
   return {
@@ -142,7 +145,7 @@ export function validateCommunityProfile(body) {
   const avatar = {};
   for (const part of ['hair', 'eyes', 'mouth']) {
     const value = body.avatar?.[part];
-    if (!Number.isInteger(value) || value < 0 || value > 5) {
+    if (!Number.isInteger(value) || value < 0 || value > 15) {
       throw new CommunityError(400, 'Choose a valid character.');
     }
     avatar[part] = value;
@@ -153,4 +156,32 @@ export function validateCommunityProfile(body) {
   }
   avatar.skinTone = skinTone;
   return { handle: `@${username}`, avatar };
+}
+
+// Ignore names, card IDs, ordering, and formatting so renaming a public deck does not make it original.
+export function communityContentSignature(cards) {
+  const normalize = value => String(value ?? '').normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
+  return JSON.stringify(cards.map(card => JSON.stringify([
+    normalize(card.question), normalize(card.correctAnswer),
+    (card.matchingLeftItems ?? []).map((left, index) => [normalize(left), normalize(card.matchingRightItems?.[index])]).sort()
+  ])).sort());
+}
+
+export async function rejectCommunityRepublication(db, cards, ownerID) {
+  // A single common fact is not enough evidence of copying; tracked downloads are blocked by provenance.
+  if (cards.length < 3) return;
+  const signature = communityContentSignature(cards);
+  let afterID = '';
+  while (true) {
+    const { results } = await db.prepare(`SELECT id,cards_json FROM community_decks
+      WHERE status='published' AND owner_id!=? AND card_count=? AND id>? ORDER BY id LIMIT 50`)
+      .bind(ownerID, cards.length, afterID).all();
+    for (const row of results) {
+      if (communityContentSignature(JSON.parse(row.cards_json)) === signature) {
+        throw new CommunityError(409, 'This matches an existing community deck. Downloaded decks can’t be republished.');
+      }
+    }
+    if (results.length < 50) return;
+    afterID = results.at(-1).id;
+  }
 }

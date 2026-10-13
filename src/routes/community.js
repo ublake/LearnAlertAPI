@@ -1,3 +1,4 @@
+import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity } from '../lib/communityAuth.js';
 import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, MEDIA_TYPES, validateMedia, validateCommunityProfile } from '../lib/communityValidation.js';
@@ -18,7 +19,7 @@ function avatarResponse(row) {
   let stored;
   try { stored = JSON.parse(row.avatar_json || '{}'); } catch { stored = {}; }
   const avatar = {};
-  for (const [part, maximum] of Object.entries({ hair: 5, eyes: 5, mouth: 5, skinTone: 6 })) {
+  for (const [part, maximum] of Object.entries({ hair: 15, eyes: 15, mouth: 15, skinTone: 6 })) {
     const value = stored?.[part];
     avatar[part] = Number.isInteger(value) && value >= 0 && value <= maximum ? value : part === 'skinTone' ? 3 : 0;
   }
@@ -255,6 +256,7 @@ async function handle(request, env) {
     await ownedDeck(env, id, user);
     if (method === 'PUT' || method === 'PATCH') {
       const { metadata: meta, cards, media } = validateCommunityDeck(await readCommunityJSON(request));
+      await rejectCommunityRepublication(db, cards, user.id);
       const { results: uploads } = await db.prepare('SELECT id,content_type,byte_size FROM community_media WHERE deck_id=? AND uploaded=1 AND deleting=0').bind(id).all();
       let publishedBytes = 0;
       for (const [reference, kind] of media) {

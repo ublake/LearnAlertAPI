@@ -73,7 +73,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal((await request('account')).status, 401);
     assert.equal((await request('account/decks')).status, 401);
     assert.equal((await request('account', 'PUT', { username: 'hi', avatar: { hair: 0, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
-    assert.equal((await request('account', 'PUT', { username: 'buddy', avatar: { hair: 9, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
+    assert.equal((await request('account', 'PUT', { username: 'buddy', avatar: { hair: 16, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
     const profile = { username: 'Funny_Buddy', avatar: { hair: 5, eyes: 4, mouth: 3 } };
     assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
     assert.deepEqual(await (await request('account', 'GET', undefined, ownerToken)).json(), {
@@ -84,6 +84,16 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal((await request('account', 'PUT', { ...profile, username: 'different_name' }, ownerToken)).status, 409);
     for (const skinTone of [-1, 7, 2.5, null, '3']) {
       assert.equal((await request('account', 'PUT', { ...profile, avatar: { ...profile.avatar, skinTone } }, ownerToken)).status, 400);
+    }
+    for (let index = 0; index < 16; index++) {
+      profile.avatar = { hair: index, eyes: index, mouth: index, skinTone: index % 7 };
+      assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
+      assert.deepEqual((await (await request('account', 'GET', undefined, ownerToken)).json()).avatar, profile.avatar);
+    }
+    for (const part of ['hair', 'eyes', 'mouth']) {
+      for (const invalid of [-1, 16, 1.5, null, '2']) {
+        assert.equal((await request('account', 'PUT', { ...profile, avatar: { ...profile.avatar, [part]: invalid } }, ownerToken)).status, 400);
+      }
     }
     profile.avatar.skinTone = 6;
     assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
@@ -214,6 +224,21 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
       method: 'DELETE', headers: { Authorization: 'Bearer moderator-test' }
     })).status, 200);
     assert.equal((await request(`decks/${moderatedID}`)).status, 404);
+    // Both declared origins and renamed/reordered copies are rejected before publishing.
+    for (const restricted of [{ origin: 'community' }, { origin: 'builtIn' }, { sourceCommunityID: id }, { sourcePremadeID: 'sat' }, { deckType: 'Course' }]) {
+      assert.equal((await request('decks/drafts', 'POST', { name: 'Copy', ...restricted }, otherToken)).status, 403);
+    }
+    const originalID = (await (await request('decks/drafts', 'POST', { name: 'Original content' }, ownerToken)).json()).id;
+    const original = { name: 'Original content', cards: ['Mercury', 'Venus', 'Earth'].map((answer, i) => ({ id: `original-${i}`, question: `Planet ${i + 1}`, correctAnswer: answer, cardType: 'tap_reveal' })) };
+    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 200);
+    const copyID = (await (await request('decks/drafts', 'POST', { name: 'Renamed copy' }, otherToken)).json()).id;
+    const copied = { name: 'Renamed copy', cards: original.cards.toReversed().map((card, i) => ({ ...card, id: `new-${i}`, question: `  ${card.question.toUpperCase()}  ` })) };
+    assert.equal((await request(`decks/${copyID}`, 'PUT', copied, otherToken)).status, 409);
+    // Original creators can still update their own publications.
+    assert.equal((await request(`decks/${originalID}`, 'PUT', original, ownerToken)).status, 200);
+    copied.cards[0].correctAnswer = 'Different material';
+    assert.equal((await request(`decks/${copyID}`, 'PUT', copied, otherToken)).status, 200);
+
     // Account deletion removes profiles, sessions and public copies, preserving an R2 retry queue.
     const accountID = (await (await request('decks/drafts', 'POST', { name: 'Account removal' }, ownerToken)).json()).id;
     const attachment = await mf.dispatchFetch(`https://api.example.test/v1/community/decks/${accountID}/media`, {
