@@ -1,6 +1,6 @@
 # LearnAlert 1.1 (3) — App Store metadata draft
 
-Owner review and App Store Connect entry required. This file does not submit a release. AI consent screen/UX was intentionally unchanged. iOS version/build, manifests, device checks and archive are owned by the app chat; this API/site task does not verify them. Apple token revocation remains blocked on the credentials and live checks in APPLE_SETUP.md.
+The coordinating app chat reports App Store privacy/metadata updates and a calculated 13+ age rating; this API/site chat has not independently inspected those entries. Owner final review remains required. This file does not submit a release. AI consent screen/UX was intentionally unchanged. iOS version/build, manifests, device checks and archive are owned by the app chat; this API/site task does not verify them. Apple revocation credentials and the notification endpoint are configured; fresh real-account exchange/revocation and signed notification delivery checks in APPLE_SETUP.md remain pending.
 
 ## App Privacy
 
