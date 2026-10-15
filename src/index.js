@@ -24,6 +24,7 @@ import { refineDeck } from "./routes/refineDeck.js";
 import { legacyQuiz } from "./routes/legacyQuiz.js";
 import { limitAIRequest, pruneAILimits } from "./lib/aiLimits.js";
 import { community, cleanupCommunity } from "./routes/community.js";
+import { appleConfigured } from './lib/appleLifecycle.js';
 import { admin } from "./routes/admin.js";
 
 function classify(error) {
@@ -133,7 +134,8 @@ export default {
         },
         community: {
           databaseConfigured: Boolean(env.COMMUNITY_DB),
-          mediaConfigured: Boolean(env.DECK_ASSETS)
+          mediaConfigured: Boolean(env.DECK_ASSETS),
+          appleRevocationConfigured: appleConfigured(env)
         },
         ai: {
           active: env.AI_PROVIDER || DEFAULT_PROVIDER,

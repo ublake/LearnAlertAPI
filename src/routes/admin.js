@@ -1,5 +1,6 @@
 import { adminIdentity } from '../lib/adminAuth.js';
 import { CommunityError, readCommunityJSON, validateCommunityProfile, validateCommunityDeck, deckMetadata, MEDIA_TYPES, readLimitedBody, validateMedia } from '../lib/communityValidation.js';
+import { restrictedSQL } from '../lib/communityAuth.js';
 import { sha256 } from '../lib/communityAuth.js';
 
 function reply(value, status = 200) {
@@ -107,7 +108,7 @@ export async function admin(request, env) {
     }
     if (path === 'overview' && method === 'GET') {
       const [decks, profiles, reports, reviews] = await db.batch([
-        db.prepare("SELECT COUNT(*) AS total,SUM(status='published' AND review_status='approved' AND admin_hidden=0) AS published,SUM(admin_hidden=1 AND status!='deleted') AS hidden FROM community_decks WHERE status!='deleted'"),
+        db.prepare(`SELECT COUNT(*) AS total,SUM(status='published' AND review_status='approved' AND admin_hidden=0 AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=d.owner_id AND ${restrictedSQL})) AS published,SUM(admin_hidden=1 AND status!='deleted') AS hidden FROM community_decks d WHERE status!='deleted'`),
         db.prepare('SELECT COUNT(*) AS total FROM community_users'),
         db.prepare('SELECT COUNT(*) AS total FROM community_reports WHERE resolved_at IS NULL'),
         db.prepare("SELECT COUNT(*) AS total FROM community_decks WHERE review_status='pending' AND status!='deleted'")
@@ -131,9 +132,9 @@ export async function admin(request, env) {
         FROM community_decks d JOIN community_users u ON u.id=d.owner_id
         WHERE (?='' OR d.name LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\') ORDER BY d.created_at DESC,d.id LIMIT 51 OFFSET ?`).bind(q, pattern, pattern, offset).all();
     } else if (method === 'GET' && path === 'profiles') {
-      list = await db.prepare(`SELECT u.id,u.handle,u.avatar_json,u.profile_completed,u.created_at,
+      list = await db.prepare(`SELECT u.id,u.public_id AS author_id,u.handle,u.avatar_json,u.profile_completed,u.created_at,r.status AS restriction_status,r.reason AS restriction_reason,r.until_at,COALESCE(r.revision,0) AS restriction_revision,
         (SELECT COUNT(*) FROM community_decks d WHERE d.owner_id=u.id AND d.status!='deleted') AS deck_count
-        FROM community_users u WHERE (?='' OR u.handle LIKE ? ESCAPE '\\') ORDER BY u.created_at DESC,u.id LIMIT 51 OFFSET ?`).bind(q, pattern, offset).all();
+        FROM community_users u LEFT JOIN community_account_restrictions r ON r.account_id=u.id WHERE (?='' OR u.handle LIKE ? ESCAPE '\\') ORDER BY u.created_at DESC,u.id LIMIT 51 OFFSET ?`).bind(q, pattern, offset).all();
     } else if (method === 'GET' && path === 'reports') {
       const resolved = url.searchParams.get('resolved') === 'true' ? 1 : 0;
       list = await db.prepare(`SELECT r.*,d.name,d.status,d.revision,d.admin_hidden,d.admin_note,d.admin_action,d.admin_updated_at,owner.handle AS owner_handle,reporter.handle AS reporter_handle
@@ -141,6 +142,9 @@ export async function admin(request, env) {
         JOIN community_users owner ON owner.id=d.owner_id JOIN community_users reporter ON reporter.id=r.user_id
         WHERE (r.resolved_at IS NOT NULL)=? AND (?='' OR d.name LIKE ? ESCAPE '\\' OR r.reason LIKE ? ESCAPE '\\')
         ORDER BY r.created_at DESC,r.deck_id,r.user_id LIMIT 51 OFFSET ?`).bind(resolved, q, pattern, pattern, offset).all();
+    } else if (method === 'GET' && path === 'restrictions') {
+      list=await db.prepare(`SELECT r.author_id AS id,r.handle,r.status,r.reason,r.until_at,r.updated_at,r.revision
+        FROM community_account_restrictions r WHERE ${restrictedSQL} AND (?='' OR r.handle LIKE ? ESCAPE '\\') ORDER BY r.updated_at DESC,r.author_id LIMIT 51 OFFSET ?`).bind(q,pattern,offset).all();
     } else if (method === 'GET' && path === 'audit') {
       list = await db.prepare('SELECT * FROM community_admin_audit ORDER BY created_at DESC,id LIMIT 51 OFFSET ?').bind(offset).all();
     }
@@ -253,6 +257,31 @@ export async function admin(request, env) {
       if (!result.at(-1).meta.changes) throw new CommunityError(409, 'Deck changed while updating visibility. Reload it.');
       return reply({ success: true });
     }
+    if(path==='profiles/restrict' && method==='POST') {
+      const body=await readCommunityJSON(request);
+      if(typeof body?.authorID!=='string'||!/^[a-f0-9]{32}$/.test(body.authorID)||!['suspend','ban','restore'].includes(body.action)||!Number.isSafeInteger(body.expectedRevision)||body.expectedRevision<0)throw new CommunityError(400,'Choose a valid account action and refresh its revision.');
+      const reason=typeof body.reason==='string'?body.reason.trim():'';
+      if(reason.length>1000||(body.action!=='restore'&&!reason))throw new CommunityError(400,'Give a moderation reason of 1–1000 characters.');
+      if(body.action==='suspend'&&(!Number.isSafeInteger(body.until)||body.until<=now()||body.until>now()+365*86400))throw new CommunityError(400,'Choose a suspension end within one year.');
+      const current=await db.prepare('SELECT * FROM community_account_restrictions WHERE author_id=?').bind(body.authorID).first();
+      const profile=await db.prepare('SELECT id,handle,public_id FROM community_users WHERE public_id=?').bind(body.authorID).first();
+      if(!current&&!profile)throw new CommunityError(404,'Profile not found.');
+      const account=profile?.id||current.account_id;
+      const snapshot=await db.prepare('SELECT * FROM community_account_restrictions WHERE account_id=?').bind(account).first();
+      if((snapshot?.revision||0)!==body.expectedRevision)throw new CommunityError(409,'Account changed. Refresh before continuing.');
+      const status=body.action==='ban'?'banned':body.action==='suspend'?'suspended':'active';
+      const guard='COALESCE((SELECT revision FROM community_account_restrictions WHERE account_id=?),0)=?';
+      const result=await db.batch([
+        db.prepare(`INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,?,?,?,? WHERE ${guard}`)
+          .bind(crypto.randomUUID(),actor,'restrict_profile',body.authorID,JSON.stringify({before:snapshot?.status||'active',after:status,reason:reason||null,until:body.action==='suspend'?body.until:null}),now(),account,body.expectedRevision),
+        db.prepare(`INSERT INTO community_account_restrictions(account_id,author_id,handle,status,reason,until_at,updated_at,actor)
+          SELECT ?,?,?,?,?,?,?,? WHERE ${guard}
+          ON CONFLICT(account_id) DO UPDATE SET author_id=excluded.author_id,handle=excluded.handle,status=excluded.status,reason=excluded.reason,until_at=excluded.until_at,updated_at=excluded.updated_at,actor=excluded.actor,revision=revision+1 WHERE revision=?`)
+          .bind(account,profile?.public_id||current.author_id,profile?.handle||current.handle,status,reason||null,body.action==='suspend'?body.until:null,now(),actor,account,body.expectedRevision,body.expectedRevision)
+      ]);
+      if(!result.at(-1).meta.changes)throw new CommunityError(409,'Account changed while saving. Refresh it.');
+      return reply({success:true});
+    }
     if (path === 'profiles/delete' && method === 'POST') {
       const body = await readCommunityJSON(request);
       if (typeof body.id !== 'string' || !body.id || body.id.length > 255) throw new CommunityError(400, 'Invalid profile.');
@@ -262,6 +291,7 @@ export async function admin(request, env) {
       // Match account deletion: queue R2 keys before deleting the SQL rows.
       // Sessions cascade, and public content disappears immediately.
       await db.batch([
+        db.prepare('INSERT INTO community_apple_revocations(id,encrypted_token,created_at) SELECT ?,encrypted_token,? FROM community_apple_tokens WHERE user_id=?').bind(crypto.randomUUID(),now(),body.id),
         db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at)
           SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id WHERE d.owner_id=?`).bind(now(), body.id),
         db.prepare('DELETE FROM community_reports WHERE user_id=?').bind(body.id),

@@ -10,9 +10,9 @@ Activated October 13, 2026:
   `23e89d5c-ec41-43db-ad8b-8e518866b3ee`.
 - Login method: one-time PIN only; one-hour application sessions; HTTP-only
   authorization cookie; application hidden from the Access launcher.
-- Migrations `0005_admin.sql` through `0009_author_admin_notices.sql` applied to production D1.
-- API release: `74a5a897-984d-4374-9b21-40e3ba36850a`.
-- Website release: `e132451d-8cc8-4b5d-9b3a-3f0504bf3e04`.
+- Migrations `0005_admin.sql` through `0010_community_safety.sql` applied to production D1.
+- API release: `a764ee6d-4834-4365-a13a-95ed690a7ad2`.
+- Website release: `be62dabd-c3ef-4492-a7b3-fcae2d12560f`.
 - Migration `0006_deck_revisions.sql` applied for optimistic editor saves.
 
 Production checks passed: signed-out admin routes redirect to Access; direct
@@ -134,3 +134,13 @@ Owner GET /v1/community/account/decks includes optional status (draft/published/
 Admin PUT continues to require expectedRevision; dashboard Hide/Restore and Delete also send it. Older API callers may omit expectedRevision for Hide/Restore/Delete, but each operation still uses the database snapshot's revision to atomically guard note updates, deletion, media queuing, the removal notice and audit logging.
 
 Author-notice release verification: 93 API tests pass; website lint, build and targeted admin TypeScript checks pass. The production owner API was tested with isolated seeded admin edit/delete states plus real owner submissions, PNG upload/access and notice dismissal. Private notes stayed protected through resubmission, Removed rows had no cards/media, public responses omitted the new fields, and test profile/session/deck/notice/R2 data were cleaned up. Existing public deck IDs, names and card counts were unchanged. Live signed-in admin edit/delete controls were not exercised in this release; their endpoints and atomic audit/cleanup behavior are covered by integration tests.
+
+## Blocking, suspension and permanent bans
+
+Migration 0010 adds opaque public profile IDs, private block lists, persistent identity restrictions, encrypted Apple token records, revocation jobs and notification receipts. Profiles offers Suspend, Ban and Restore access; Restrictions lists active restrictions after profile deletion. Actions require revision checks and a moderation reason. Suspension lasts 1–365 days; ban persists until the owner restores access. All restricted content is excluded from public browse/download/media without deleting it, and blocked viewers cannot download that author's content while signed in. Public author IDs never expose Apple's identity subject. Private study/downloaded copies are unaffected.
+
+Account restriction records and another user's block reference intentionally survive profile deletion to prevent evasion; see the website policy for retained moderation/audit data. ADMIN.md contains no private Apple keys. Required Apple setup and precise production-validation limitations are in APPLE_SETUP.md, with App Store drafts in RELEASE_REVIEW_1_1.md.
+
+Safety release verification: all 97 API tests pass. Website lint, targeted admin TypeScript checks and production build pass from an isolated copy with the same lockfile (Desktop dependencies initially stalled); changed source files were compared to the original checkout before deployment. Updated public privacy/terms HTML is live. A temporary production profile verified opaque author/profile IDs, real viewer block/list/count filtering, denied blocked detail/preview requests without changing download counters, unblock, private PNG access, restricted-account management/deletion, and continuing posting denial across a seeded profile recreation. Invalid Apple notifications were rejected. All test profile/session/block/restriction/deck/media and queued test objects were removed; existing public IDs, titles, card and download counts were unchanged. The live test caught and fixed Cloudflare's empty DELETE-body stream behavior; this is covered by a regression test.
+
+Apple production health still reports appleRevocationConfigured=false. No real authorization-code exchange, Apple revocation, server-notification delivery or signed-in admin button interaction is claimed live; lifecycle and admin routes are covered by cryptographic/local integration tests. Apple key setup and real disposable-account checks remain required before declaring release readiness. The AI consent screen and iOS files were not changed by this API/site task.

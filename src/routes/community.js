@@ -1,7 +1,8 @@
 import { ensureCommunityUser } from '../lib/communityHandles.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
-import { communityUser, sha256, verifyAppleIdentity } from '../lib/communityAuth.js';
+import { communityUser, sha256, verifyAppleIdentity, checkAccountRestriction, accountRestriction, checkViewerAccess, restrictedSQL } from '../lib/communityAuth.js';
+import { appleConfigured, validateAppleCode, exchangeAppleCode, revokeAppleJob, deleteCommunityAccount, verifyAppleEvent } from '../lib/appleLifecycle.js';
 import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, MEDIA_TYPES, validateMedia, validateCommunityProfile } from '../lib/communityValidation.js';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -26,11 +27,11 @@ function avatarResponse(row) {
   }
   return avatar;
 }
-function profileResponse(row) {
-  return { handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
+function profileResponse(row,restriction=null) {
+  return { accountStatus: restriction?.status||'active', restrictionMessage: restriction?.reason||null, authorID: row.public_id, handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
 }
 function deckResponse(row, detail = false, owner = false) {
-  return { id: row.id, name: row.name, description: row.description, authorHandle: row.handle,
+  return { id: row.id, authorID: row.author_id, name: row.name, description: row.description, authorHandle: row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
     ...(row.review_status ? { reviewStatus: row.review_status } : {}),
@@ -71,7 +72,7 @@ async function handle(request, env) {
   }
 
   if (path === '/v1/community/account' && (method === 'GET' || method === 'PUT')) {
-    const user = await communityUser(request, env);
+    const user = await communityUser(request, env,true,method==='GET');
     if (method === 'PUT') {
       const body = await readCommunityJSON(request);
       const profile = validateCommunityProfile(body);
@@ -92,59 +93,114 @@ async function handle(request, env) {
         throw error;
       }
     }
-    const row = await db.prepare('SELECT handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(user.id).first();
+    const row = await db.prepare('SELECT public_id,handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(user.id).first();
     if (!row) throw new CommunityError(401, 'Please sign in with Apple again.');
-    return json(profileResponse(row));
+    return json(profileResponse(row,await accountRestriction(db,user.id)));
   }
 
   if (path === '/v1/community/account/decks' && method === 'GET') {
-    const user = await communityUser(request, env);
+    const user = await communityUser(request, env,true,true);
     const offset = Math.max(0, Math.min(100000, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
-    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,d.updated_at AS sort_at
+    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,u.public_id AS author_id,d.updated_at AS sort_at
       FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected') OR d.admin_action IS NOT NULL)
       UNION ALL
-      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,n.admin_updated_at
+      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,u.public_id,n.admin_updated_at
       FROM community_deck_notices n JOIN community_users u ON u.id=n.owner_id WHERE n.owner_id=?
       ORDER BY sort_at DESC,id DESC LIMIT 51 OFFSET ?`).bind(user.id,user.id,offset).all();
     return json({ decks: results.slice(0,50).map(row => deckResponse(row,false,true)), nextOffset: results.length>50 ? offset+50 : null });
   }
 
   if (path === '/v1/community/account' && method === 'DELETE') {
-    const user = await communityUser(request, env);
-    // Preserve object keys in a deletion queue before cascading their SQL rows.
-    // Public access and every session end immediately, even if R2 is unavailable.
-    await db.batch([
-      db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at)
-        SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id
-        WHERE d.owner_id=?`).bind(now(), user.id),
-      db.prepare('DELETE FROM community_reports WHERE user_id=?').bind(user.id),
-      db.prepare('DELETE FROM community_decks WHERE owner_id=?').bind(user.id),
-      db.prepare('DELETE FROM community_users WHERE id=?').bind(user.id)
-    ]);
-    return json({ success: true });
+    const user = await communityUser(request,env,true,true);
+    const body=await readCommunityJSON(request,true);
+    if(!body || typeof body!=='object')throw new CommunityError(400,'Invalid deletion request.');
+    validateAppleCode(body);
+    if(body.identityToken!==undefined || body.authorizationCode!==undefined) {
+      if(typeof body.identityToken!=='string'||body.identityToken.length>12000||typeof body.nonce!=='string'||!/^[a-f0-9]{64}$/.test(body.nonce))throw new CommunityError(400,'Reauthenticate with Apple before deleting.');
+      const identity=await verifyAppleIdentity(body.identityToken,body.nonce,env.APPLE_CLIENT_ID||'com.learnalert.app');
+      if(identity!==user.id)throw new CommunityError(401,'Use the Apple account associated with this community profile.','APPLE_IDENTITY_MISMATCH');
+      if(body.authorizationCode && appleConfigured(env)) {
+        const encrypted=await exchangeAppleCode(env,body,user.id);
+        await db.prepare('INSERT INTO community_apple_tokens(user_id,encrypted_token,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET encrypted_token=excluded.encrypted_token,updated_at=excluded.updated_at').bind(user.id,encrypted,now()).run();
+      }
+    }
+    const saved=await db.prepare('SELECT 1 FROM community_apple_tokens WHERE user_id=?').bind(user.id).first();
+    if(appleConfigured(env)&&!saved)throw new CommunityError(409,'Sign in with Apple again to authorize account deletion.','APPLE_REAUTH_REQUIRED');
+    const job=await deleteCommunityAccount(db,user.id);
+    const appleRevocation=job ? (await revokeAppleJob(env,job) ? 'revoked' : 'pending') : 'not_configured';
+    return json({success:true,appleRevocation});
+  }
+
+  if(path==='/v1/community/auth/apple/notifications' && method==='POST') {
+    const body=await readCommunityJSON(request);
+    const {id,event}=await verifyAppleEvent(body?.payload,env.APPLE_NOTIFICATION_AUDIENCE||env.APPLE_CLIENT_ID||'com.learnalert.app');
+    const eligible="EXISTS(SELECT 1 FROM community_users WHERE id=? AND created_at<=?) AND NOT EXISTS(SELECT 1 FROM community_apple_events WHERE id=?)";
+    const statements=[];
+    if(['consent-revoked','account-deleted'].includes(event.type))statements.push(
+      db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id WHERE d.owner_id=? AND ${eligible}`).bind(now(),event.sub,event.sub,event.event_time,id),
+      db.prepare(`DELETE FROM community_reports WHERE user_id=? AND ${eligible}`).bind(event.sub,event.sub,event.event_time,id),
+      db.prepare(`DELETE FROM community_decks WHERE owner_id=? AND ${eligible}`).bind(event.sub,event.sub,event.event_time,id),
+      db.prepare(`DELETE FROM community_users WHERE id=? AND created_at<=? AND NOT EXISTS(SELECT 1 FROM community_apple_events WHERE id=?)`).bind(event.sub,event.event_time,id));
+    statements.push(db.prepare('INSERT INTO community_apple_events(id,created_at) VALUES(?,?) ON CONFLICT(id) DO NOTHING').bind(id,now()));
+    await db.batch(statements);return json({success:true});
+  }
+
+  if(path==='/v1/community/account/blocks' && (method==='GET'||method==='POST')) {
+    const user=await communityUser(request,env);
+    if(method==='GET') {
+      const {results}=await db.prepare('SELECT COALESCE(u.public_id,b.blocked_author_id) AS id,COALESCE(u.handle,b.blocked_handle) AS handle FROM community_blocks b LEFT JOIN community_users u ON u.id=b.blocked_account_id WHERE b.viewer_id=? ORDER BY b.created_at DESC,b.blocked_author_id').bind(user.id).all();
+      return json({users:results});
+    }
+    const body=await readCommunityJSON(request);
+    if(typeof body?.authorID!=='string'||!/^[a-f0-9]{32}$/.test(body.authorID))throw new CommunityError(400,'Choose a valid community author.');
+    const author=await db.prepare('SELECT id,handle,public_id FROM community_users WHERE public_id=?').bind(body.authorID).first();
+    if(!author)throw new CommunityError(404,'Author not found.');
+    if(author.id===user.id)throw new CommunityError(400,'You cannot block your own profile.');
+    const result=await db.prepare(`INSERT INTO community_blocks(viewer_id,blocked_account_id,blocked_author_id,blocked_handle,created_at)
+      SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM community_blocks WHERE viewer_id=?)<500 OR EXISTS(SELECT 1 FROM community_blocks WHERE viewer_id=? AND blocked_account_id=?)
+      ON CONFLICT(viewer_id,blocked_account_id) DO UPDATE SET blocked_author_id=excluded.blocked_author_id,blocked_handle=excluded.blocked_handle`).bind(user.id,author.id,author.public_id,author.handle,now(),user.id,user.id,author.id).run();
+    if(!result.meta.changes)throw new CommunityError(429,'Your block list is full. Unblock an author first.');
+    return json({success:true});
+  }
+  const unblock=path.match(/^\/v1\/community\/account\/blocks\/([a-f0-9]{32})$/);
+  if(unblock&&method==='DELETE') {
+    const user=await communityUser(request,env);
+    await db.prepare('DELETE FROM community_blocks WHERE viewer_id=? AND (blocked_author_id=? OR blocked_account_id=(SELECT id FROM community_users WHERE public_id=?))').bind(user.id,unblock[1],unblock[1]).run();
+    return json({success:true});
   }
 
   if (path === '/v1/community/auth/apple' && method === 'POST') {
     const body = await readCommunityJSON(request);
-    if (typeof body.identityToken !== 'string' || body.identityToken.length > 12000 ||
+    if (typeof body?.identityToken !== 'string' || body.identityToken.length > 12000 ||
         typeof body.nonce !== 'string' || !/^[a-f0-9]{64}$/.test(body.nonce)) {
       throw new CommunityError(400, 'Invalid sign-in request.');
     }
+    validateAppleCode(body);
     const id = await verifyAppleIdentity(body.identityToken, body.nonce, env.APPLE_CLIENT_ID || 'com.learnalert.app');
+    const restriction=await accountRestriction(db,id);
+    if(restriction&&!await db.prepare('SELECT 1 FROM community_users WHERE id=?').bind(id).first())await checkAccountRestriction(db,id);
+    const encrypted=body.authorizationCode && appleConfigured(env) ? await exchangeAppleCode(env,body,id) : null;
     await ensureCommunityUser(db, id, now());
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const token = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
     const expiresAt = now() + 30 * 86400;
-    await db.batch([
+    const statements=[
       db.prepare('DELETE FROM community_sessions WHERE user_id=? AND expires_at<=?').bind(id, now()),
-      db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await sha256(token), id, expiresAt)
-    ]);
-    const user = await db.prepare('SELECT handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(id).first();
-    return json({ token, expiresAt, handle: user.handle, profile: profileResponse(user) }, 201);
+      db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM community_users WHERE id=?)').bind(await sha256(token), id, expiresAt,id)
+    ];
+    if(encrypted)statements.push(db.prepare('INSERT INTO community_apple_tokens(user_id,encrypted_token,updated_at) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM community_users WHERE id=?) ON CONFLICT(user_id) DO UPDATE SET encrypted_token=excluded.encrypted_token,updated_at=excluded.updated_at').bind(id,encrypted,now(),id));
+    await db.batch(statements);
+    const user = await db.prepare('SELECT public_id,handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(id).first();
+    if(!user) {
+      if(encrypted) { const job={id:crypto.randomUUID(),encrypted_token:encrypted};await db.prepare('INSERT INTO community_apple_revocations(id,encrypted_token,created_at) VALUES(?,?,?)').bind(job.id,encrypted,now()).run();await revokeAppleJob(env,job); }
+      throw new CommunityError(401,'This community account was removed.');
+    }
+    return json({ token, expiresAt, appleRevocationAvailable: appleConfigured(env)&&Boolean(encrypted||await db.prepare('SELECT 1 FROM community_apple_tokens WHERE user_id=?').bind(id).first()), handle: user.handle, profile: profileResponse(user,await accountRestriction(db,id)) }, 201);
   }
 
   if (path === '/v1/community/decks' && method === 'GET') {
+    const viewer=await communityUser(request,env,false);
     const limit = Math.min(50, Math.max(1, Number.parseInt(url.searchParams.get('limit') || '30', 10) || 30));
     const offset = Math.min(100000, Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
     const search = (url.searchParams.get('q') || '').trim().slice(0, 120);
@@ -156,11 +212,13 @@ async function handle(request, env) {
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
     const filter = `FROM community_decks d JOIN community_users u ON u.id=d.owner_id
-      WHERE d.status='published' AND d.review_status='approved' AND d.admin_hidden=0 AND (?='' OR d.category_tag=? COLLATE NOCASE)
+      WHERE d.status='published' AND d.review_status='approved' AND d.admin_hidden=0
+      AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=d.owner_id AND ${restrictedSQL})
+      AND NOT EXISTS(SELECT 1 FROM community_blocks b WHERE b.viewer_id=? AND b.blocked_account_id=d.owner_id) AND (?='' OR d.category_tag=? COLLATE NOCASE)
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
-    const parameters = [category, category, search, pattern, pattern, pattern];
+    const parameters = [viewer?.id||'',category, category, search, pattern, pattern, pattern];
     const [page, count] = await db.batch([
-      db.prepare(`SELECT d.*,u.handle,u.avatar_json ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
         .bind(...parameters, limit + 1, offset),
       db.prepare(`SELECT COUNT(*) AS total ${filter}`).bind(...parameters)
     ]);
@@ -221,9 +279,10 @@ async function handle(request, env) {
     const row = await db.prepare(`SELECT m.*, d.owner_id,d.status,d.admin_hidden,d.review_status FROM community_media m
       JOIN community_decks d ON d.id=m.deck_id WHERE m.id=? AND m.uploaded=1 AND m.deleting=0 AND d.status!='deleted'`).bind(mediaMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Attachment not found.');
+    const viewer=await communityUser(request,env,false);
+    await checkViewerAccess(db,viewer,row.owner_id);
     if (row.status !== 'published' || row.review_status !== 'approved' || row.admin_hidden || !row.attached) {
-      const user = await communityUser(request, env, false);
-      if (!user || user.id !== row.owner_id) throw new CommunityError(404, 'Attachment not found.');
+      if (!viewer || viewer.id !== row.owner_id) throw new CommunityError(404, 'Attachment not found.');
     }
     const object = method === 'HEAD' ? await env.DECK_ASSETS.head(row.object_key) : await env.DECK_ASSETS.get(row.object_key);
     if (!object) throw new CommunityError(404, 'Attachment not found.');
@@ -239,6 +298,8 @@ async function handle(request, env) {
   if (reportMatch && method === 'POST') {
     const user = await communityUser(request, env);
     const body = await readCommunityJSON(request);
+    const target=await db.prepare('SELECT owner_id FROM community_decks WHERE id=?').bind(reportMatch[1]).first();
+    if(target)await checkViewerAccess(db,user,target.owner_id);
     if (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.length > 1000) throw new CommunityError(400, 'Please give a reason for reporting this deck.');
     const result = await db.prepare(`INSERT INTO community_reports(deck_id,user_id,reason,created_at)
       SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM community_decks WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0)
@@ -250,9 +311,10 @@ async function handle(request, env) {
 
   const previewMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/preview$`));
   if (previewMatch && method === 'GET') {
-    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d
+    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id FROM community_decks d
       JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(previewMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Deck not found.');
+    await checkViewerAccess(db,await communityUser(request,env,false),row.owner_id);
     const deck = deckResponse(row, true);
     deck.cards = deck.cards.slice(0, 5);
     return json({ deck });
@@ -262,8 +324,9 @@ async function handle(request, env) {
   if (deckMatch) {
     const id = deckMatch[1];
     if (method === 'GET') {
-      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(id).first();
+      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(id).first();
       if (!row) throw new CommunityError(404, 'Deck not found.');
+      await checkViewerAccess(db,await communityUser(request,env,false),row.owner_id);
       await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0").bind(id).run();
       return json({ deck: deckResponse({ ...row, download_count: row.download_count + 1 }, true) });
     }
@@ -314,7 +377,7 @@ export async function community(request, env, requestId) {
     if (String(error.message).includes('community_attachment_unavailable')) {
       return apiError('ATTACHMENT_UNAVAILABLE', 'An attachment expired. Upload it again before publishing.', 409, requestId);
     }
-    if (error instanceof CommunityError) return apiError('COMMUNITY_ERROR', error.message, error.status, requestId);
+    if (error instanceof CommunityError) return apiError(error.code || 'COMMUNITY_ERROR', error.message, error.status, requestId);
     console.error('Community request failed', requestId, error);
     return apiError('COMMUNITY_ERROR', 'The community library is temporarily unavailable. Please try again.', 500, requestId);
   }
@@ -327,6 +390,9 @@ export async function cleanupCommunity(env) {
     db.prepare('DELETE FROM community_sessions WHERE expires_at<=?').bind(now()),
     db.prepare("UPDATE community_decks SET status='deleted' WHERE status='draft' AND admin_created=0 AND COALESCE(review_status,'') NOT IN ('pending','rejected') AND updated_at<?").bind(now() - 86400)
   ]);
+  await db.prepare('DELETE FROM community_apple_events WHERE created_at<?').bind(now()-30*86400).run();
+  const revocations=await db.prepare('SELECT id,encrypted_token FROM community_apple_revocations ORDER BY created_at LIMIT 10').all();
+  for(const job of revocations.results)await revokeAppleJob(env,job);
   const queued = await db.prepare('SELECT object_key FROM community_deleted_objects ORDER BY created_at LIMIT 500').all();
   for (const row of queued.results) {
     await env.DECK_ASSETS.delete(row.object_key);

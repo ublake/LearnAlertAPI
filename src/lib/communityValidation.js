@@ -1,5 +1,5 @@
 export class CommunityError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, code = 'COMMUNITY_ERROR') { super(message); this.status = status; this.code = code; }
 }
 
 export async function readLimitedBody(request, maximum) {
@@ -29,8 +29,10 @@ export async function readLimitedBody(request, maximum) {
   return bytes;
 }
 
-export async function readCommunityJSON(request) {
+export async function readCommunityJSON(request, allowEmpty = false) {
+  if(allowEmpty && !request.body)return {};
   const bytes = await readLimitedBody(request, 1024 * 1024);
+  if(allowEmpty && !bytes.length)return {};
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new CommunityError(400, 'Request body must be valid JSON.'); }
 }

@@ -1,3 +1,4 @@
+import { checkAccountRestriction, restrictedSQL } from './communityAuth.js';
 import { CommunityError } from './communityValidation.js';
 
 const adjectives = ['cozy', 'sunny', 'sleepy', 'curious', 'happy', 'tiny', 'bouncy', 'brave', 'mellow', 'jolly', 'dreamy', 'peppy', 'fluffy', 'silly', 'lucky', 'snappy', 'gentle', 'clever', 'chill', 'dizzy', 'starry', 'bright', 'fuzzy', 'zippy', 'minty', 'bubbly', 'jazzy', 'smiley', 'cosmic', 'wiggly', 'quiet', 'spry'];
@@ -26,11 +27,13 @@ export async function ensureCommunityUser(db, id, timestamp, candidate = generat
           .bind(handle, id, existing.handle).run();
       } else {
         await db.prepare(`INSERT INTO community_users(id,handle,created_at) SELECT ?,?,?
-          WHERE NOT EXISTS (SELECT 1 FROM community_users WHERE id=?) ON CONFLICT(id) DO NOTHING`)
-          .bind(id, handle, timestamp, id).run();
+          WHERE NOT EXISTS (SELECT 1 FROM community_users WHERE id=?)
+          AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=? AND ${restrictedSQL}) ON CONFLICT(id) DO NOTHING`)
+          .bind(id, handle, timestamp, id, id).run();
       }
       const saved = await db.prepare('SELECT id,handle,profile_completed FROM community_users WHERE id=?').bind(id).first();
       if (saved) return saved;
+      await checkAccountRestriction(db,id);
     } catch (error) {
       if (!String(error.message).includes('UNIQUE constraint failed')) throw error;
       // The unique index resolves collisions atomically, including concurrent sign-ins.

@@ -8,12 +8,12 @@ export async function sha256(value) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function decodePart(value) {
+export function decodePart(value) {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
   return Uint8Array.from(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')), c => c.charCodeAt(0));
 }
 
-async function appleKeys(force = false) {
+export async function appleKeys(force = false) {
   if (!force && appleKeyCache && appleKeyCache.expires > Date.now()) return appleKeyCache.keys;
   const response = await fetch('https://appleid.apple.com/auth/keys');
   if (!response.ok) throw new CommunityError(503, 'Apple sign-in is temporarily unavailable.');
@@ -53,15 +53,31 @@ export async function verifyAppleIdentity(token, nonce, audience, suppliedKeys) 
   }
 }
 
-export async function communityUser(request, env, required = true) {
+export async function communityUser(request, env, required = true, allowRestricted = false) {
   const authorization = request.headers.get('Authorization') ?? '';
   const token = authorization.match(/^Bearer ([a-f0-9]{64})$/i)?.[1];
   if (token) {
     const row = await env.COMMUNITY_DB.prepare(
-      'SELECT u.id, u.handle FROM community_sessions s JOIN community_users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?'
+      'SELECT u.id, u.handle, u.public_id FROM community_sessions s JOIN community_users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?'
     ).bind(await sha256(token), Math.floor(Date.now() / 1000)).first();
-    if (row) return row;
+    if (row) {
+      if (!allowRestricted) await checkAccountRestriction(env.COMMUNITY_DB,row.id);
+      return row;
+    }
   }
-  if (required) throw new CommunityError(401, 'Please sign in with Apple to continue.');
+  if (required || authorization) throw new CommunityError(401, 'Please sign in with Apple to continue.');
   return null;
+}
+
+export const restrictedSQL = "(r.status='banned' OR (r.status='suspended' AND r.until_at>unixepoch()))";
+export async function accountRestriction(db,id) {
+  return await db.prepare(`SELECT status,reason,until_at FROM community_account_restrictions r WHERE r.account_id=? AND ${restrictedSQL}`).bind(id).first();
+}
+export async function checkAccountRestriction(db,id) {
+  const restriction=await accountRestriction(db,id);
+  if (restriction) throw new CommunityError(403,restriction.status==='banned' ? 'This community account is banned. Contact contact@learnalertapp.com to appeal.' : 'This community account is suspended. Contact contact@learnalertapp.com for help.',restriction.status==='banned' ? 'ACCOUNT_BANNED' : 'ACCOUNT_SUSPENDED');
+}
+export async function checkViewerAccess(db,viewer,ownerID) {
+  if(await db.prepare(`SELECT 1 FROM community_account_restrictions r WHERE r.account_id=? AND ${restrictedSQL}`).bind(ownerID).first()) throw new CommunityError(404,'This community content is unavailable.');
+  if(viewer && await db.prepare('SELECT 1 FROM community_blocks WHERE viewer_id=? AND blocked_account_id=?').bind(viewer.id,ownerID).first()) throw new CommunityError(403,'You blocked this author. Unblock them to view their community decks.','AUTHOR_BLOCKED');
 }
