@@ -1,6 +1,6 @@
 # LearnAlert 1.1 (3) — App Store metadata draft
 
-The coordinating app chat reports App Store privacy/metadata updates and a calculated 13+ age rating; this API/site chat has not independently inspected those entries. Owner final review remains required. This file does not submit a release. AI consent screen/UX was intentionally unchanged. iOS version/build, manifests, device checks and archive are owned by the app chat; this API/site task does not verify them. Apple revocation credentials and the notification endpoint are configured; fresh real-account exchange/revocation and signed notification delivery checks in APPLE_SETUP.md remain pending.
+The coordinating app chat reports App Store privacy/metadata updates and a calculated 13+ age rating; this API/site chat has not independently inspected those entries. Owner final review remains required. This file does not submit a release. AI consent screen/UX was intentionally unchanged. iOS version/build, manifests, device checks and archive are owned by the app chat; this API/site task does not verify them. Apple revocation credentials and the notification endpoint are configured; the app chat has reported live authorization-code exchange/encrypted retention and accepted revocation after owner-approved account/listing deletion. Signed server-notification delivery remains unverified; the app chat is separately fixing a deletion-sheet completion race. See APPLE_SETUP.md for exact evidence and limits.
 
 ## App Privacy
 
@@ -35,13 +35,13 @@ Marketing URL: https://learnalertapp.com
 
 ## Reviewer notes draft (verify exact iOS labels before pasting)
 
-LearnAlert teaches personal flashcards through local interactive notifications. Personal study and community browse/download work without an account. Public examples currently include Hangeul: Letters and Syllable Structure and SAT Academic Vocabulary. Notification permission is optional; in-app study remains available. Test a fresh installation on both iPhone and iPad.
+LearnAlert teaches personal flashcards through local interactive notifications. Personal study and community browse/download work without an account. Confirm the live community catalog before naming public examples: the two listings used in the live Apple deletion test were intentionally deleted with owner approval and must not be promised as available or automatically recreated. Notification permission is optional; in-app study remains available. Test a fresh installation on both iPhone and iPad.
 
 Discover > Community decks: browse, preview and download an editable personal copy. Sign in with Apple for sharing/reporting/blocking and account management using the reviewer's own Apple account; there is no shared password/demo admin login. Show Block author on another author's deck and manage Unblock in the community account controls. While signed in, blocking filters browse/preview/download/media; existing personal copies remain available. Report a public deck using its Report control and reason.
 
 Share a personal deck, including supported image/audio attachments. Submission immediately shows Pending review and “Review can take up to 3 days”; it remains private until operator approval. Updating an approved deck returns it to private review. My shared decks refreshes and shows operator notes/removal notices; Removed notices can be dismissed. No automatic approval timer or user-to-user chat exists. Contact contact@learnalertapp.com if expedited review of a test submission is needed; do not give reviewers owner-only Cloudflare admin access.
 
-Community account controls > Delete Community Account: complete Apple reauthentication if prompted. Community profile/sessions/content are removed, with queued media cleanup; personal device decks remain. Verify real Apple token revocation before claiming that portion operational. Admin audit/security records can survive deletion as disclosed in the privacy policy. Abuse reports are reviewed by the owner, who can reject/hide/delete and suspend/ban persistently.
+Community account controls > Delete Community Account: complete Apple reauthentication if prompted. Community profile/sessions/content are removed, with queued media cleanup; personal device decks remain. Live exchange/retention and accepted revocation are supported by the evidence in APPLE_SETUP.md; complete the app deletion-sheet race fix validation before using these notes, and keep signed webhook delivery marked unverified. Admin audit/security records can survive deletion as disclosed in the privacy policy. Abuse reports are reviewed by the owner, who can reject/hide/delete and suspend/ban persistently.
 
 ## Sources
 

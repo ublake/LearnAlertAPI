@@ -8,7 +8,15 @@ API release: `1018792f-16a2-4e4e-9758-f960f35b713b`. Live health reports `commun
 
 The coordinating Apple Developer flow saved and reopened the primary app's configuration to confirm this server notification endpoint is registered: `https://api.learnalertapp.com/v1/community/auth/apple/notifications`. Primary `com.learnalert.app` remained selected. APPLE_NOTIFICATION_AUDIENCE falls back to APPLE_CLIENT_ID; never accept arbitrary audiences or relax signatures.
 
-**Still unverified:** a fresh real Apple authorization-code exchange, subsequent token revocation/account deletion, and actual signed notification delivery. Configuration presence, local signing and mocked tests do not establish those live outcomes. No real user token was exchanged or revoked by this setup task, and no public deck or profile was changed.
+## Live exchange and deletion evidence
+
+The coordinating app chat performed a real simulator Apple flow after the user completed Apple Account password verification. Sign-out/sign-in succeeded and restored the existing community test profile, avatar, permanent username and its two approved deck listings. Read-only D1 verification reported `has_encrypted_apple_token=1`, supporting successful authorization-code exchange and encrypted token retention.
+
+The user then explicitly approved permanent deletion of that exact community test account and its two listings. Fresh Apple reauthentication and the deletion request succeeded. Follow-up D1 checks reported `matching_accounts=0`, `stored_apple_tokens=0`, and `pending_apple_revocations=0`. Given the verified retained token before deletion and the implementation's removal of a revocation job only after Apple returns HTTP 200, these observations support accepted live token revocation. This evidence was reported by the coordinating app chat; this API/docs update did not independently capture Apple's response body or perform another deletion.
+
+The account and listings were intentionally deleted with approval; do not recreate them as fixtures. The app chat observed a UI completion race: a credential-revoked notification cleared the session before the successful deletion response guard, leaving the deletion sheet open. Its app-only fix/regression validation is being handled separately and is not claimed complete here.
+
+**Still unverified:** actual signed Apple server-to-server notification delivery. The registered endpoint and unsigned-request rejection do not establish that delivery. The simulator's local credential-revoked notification is a separate signal and does not prove webhook delivery.
 
 ## Maintenance
 
@@ -24,9 +32,9 @@ Successful deletion removes community data immediately and returns success:true 
 
 Apple notifications accept JSON {payload: signedJWT}. RS256 signatures, known Apple key, issuer, configured audience, issue time (within seven days), optional expiry and unique jti are checked. Apple examples omit exp; absence does not disable signature/time verification. consent-revoked/account-deleted delete only the matching account whose creation predates the event, its sessions and community content. Email events are acknowledged without collecting email. Receipt IDs deduplicate deliveries for 30 days; old events do not remove a newly created account. The endpoint is registered; a real signed Apple notification delivery remains to be tested.
 
-## Validation required before submission
+## Remaining validation before submission
 
-Mocked Apple tests verify ES256 client secrets, code exchange, mismatched identities, AES-GCM storage, reauthentication errors, immediate deletion, transient revocation retry, verified server notifications and replay/stale-account guards. With the enabled key/config now installed, test a disposable real Apple account's authorization and deletion, verify Apple's revoked credential state, and test signed server notifications before claiming the lifecycle complete in production.
+Mocked Apple tests verify ES256 client secrets, code exchange, mismatched identities, AES-GCM storage, reauthentication errors, immediate deletion, transient revocation retry, verified server notifications and replay/stale-account guards. Real authorization-code exchange and accepted revocation are supported by the live evidence above. Verify the app deletion-sheet race fix and its regression test/build, and test an actual signed server notification before claiming the complete lifecycle validated. Do not repeat destructive tests against the deleted profile or recreate its listings.
 
 Primary references:
 - https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple
