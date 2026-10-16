@@ -163,6 +163,12 @@ test('admin moderation hides all public entry points, survives owner edits, rest
     assert.equal((await pub(`media/${importedMedia}`)).status, 200);
     const publication = (await (await call(`decks/${importedId}`)).json()).deck;
     assert.ok(publication.published_at); assert.equal(publication.cards[0].promptImageID, importedMedia);
+    const official = await db.prepare("SELECT public_id,created_at FROM community_users WHERE handle='@learnalert'").first();
+    const officialProfileResponse=await pub(`profiles/${official.public_id}`);
+    assert.equal(officialProfileResponse.status,200);
+    const officialProfile=await officialProfileResponse.json();
+    assert.equal(officialProfile.profile.handle,'@learnalert'); assert.equal(officialProfile.profile.profileCreatedAt,official.created_at);
+    assert.equal(officialProfile.profile.stats.publishedDeckCount,1); assert.equal(officialProfile.decks[0].id,importedId);
     assert.equal((await call('decks', 'POST', { name: 'Second official deck', ownerId: 'official' })).status, 201);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM community_users WHERE handle='@learnalert'").first()).n, 1);
     // Real app submissions are private, retained for manual review, and cannot

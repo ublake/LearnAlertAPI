@@ -1,4 +1,5 @@
 import { ensureCommunityUser } from '../lib/communityHandles.js';
+import { avatarResponse, creatorStats, profileCreatedAt, pageParameters, publicDeckSQL, validLikeSQL, reactionColumnsSQL } from '../lib/communityCreators.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity, checkAccountRestriction, accountRestriction, checkViewerAccess, restrictedSQL } from '../lib/communityAuth.js';
@@ -17,23 +18,18 @@ async function ownedDeck(env, id, user) {
   if (!deck) throw new CommunityError(404, 'Deck not found.');
   return deck;
 }
-function avatarResponse(row) {
-  let stored;
-  try { stored = JSON.parse(row.avatar_json || '{}'); } catch { stored = {}; }
-  const avatar = {};
-  for (const [part, maximum] of Object.entries({ hair: 15, eyes: 15, mouth: 15, skinTone: 6 })) {
-    const value = stored?.[part];
-    avatar[part] = Number.isInteger(value) && value >= 0 && value <= maximum ? value : part === 'skinTone' ? 3 : 0;
-  }
-  return avatar;
-}
 function profileResponse(row,restriction=null) {
   return { accountStatus: restriction?.status||'active', restrictionMessage: restriction?.reason||null, authorID: row.public_id, handle: row.handle, avatar: avatarResponse(row), isComplete: Boolean(row.profile_completed) };
+}
+async function ownerProfile(db, row, restriction = null) {
+  return { ...profileResponse(row,restriction), profileCreatedAt: profileCreatedAt(row),
+    hideStatsPublicly: Boolean(row.hide_stats_publicly), stats: await creatorStats(db,row) };
 }
 function deckResponse(row, detail = false, owner = false) {
   return { id: row.id, authorID: row.author_id, name: row.name, description: row.description, authorHandle: row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
+    likeCount: row.like_count ?? 0, viewerHasLiked: Boolean(row.viewer_has_liked),
     ...(row.review_status ? { reviewStatus: row.review_status } : {}),
     reviewMessage: row.review_message ?? null, submittedAt: row.submitted_at ?? null,
     ...(owner ? { status: row.status, adminNote: row.admin_note ?? null, adminAction: row.admin_action ?? null, adminUpdatedAt: row.admin_updated_at ?? null, isHidden: Boolean(row.admin_hidden) } : {}),
@@ -75,39 +71,120 @@ async function handle(request, env) {
     const user = await communityUser(request, env,true,method==='GET');
     if (method === 'PUT') {
       const body = await readCommunityJSON(request);
-      const profile = validateCommunityProfile(body);
-      const taken = await db.prepare('SELECT id FROM community_users WHERE handle=? COLLATE NOCASE AND id!=?')
-        .bind(profile.handle, user.id).first();
-      if (taken) throw new CommunityError(409, 'That username is taken. Try another one.');
-      try {
-        // The first setup wins atomically, including simultaneous saves from two devices.
-        // Legacy clients omit skinTone; keep the current saved tone when they edit a character.
-        const avatarJSON = JSON.stringify(profile.avatar);
-        const result = await db.prepare(`UPDATE community_users SET handle=?,
-          avatar_json=CASE WHEN ? THEN ? ELSE json_set(?, '$.skinTone', COALESCE(json_extract(avatar_json,'$.skinTone'),3)) END,
-          profile_completed=1 WHERE id=? AND (profile_completed=0 OR handle=? COLLATE NOCASE)`)
-          .bind(profile.handle, body.avatar.skinTone !== undefined ? 1 : 0, avatarJSON, avatarJSON, user.id, profile.handle).run();
-        if (!result.meta.changes) throw new CommunityError(409, 'Your username is permanent. You can still change your character.');
-      } catch (error) {
-        if (String(error.message).includes('UNIQUE constraint failed')) throw new CommunityError(409, 'That username is taken. Try another one.');
-        throw error;
+      if (!body || typeof body !== 'object' || Array.isArray(body) ||
+          (body.hideStatsPublicly !== undefined && typeof body.hideStatsPublicly !== 'boolean')) {
+        throw new CommunityError(400,'Choose a valid profile privacy setting.');
+      }
+      const hasProfile = body.username !== undefined || body.avatar !== undefined;
+      if (!hasProfile && body.hideStatsPublicly === undefined) throw new CommunityError(400,'Choose a profile change.');
+      if (hasProfile) {
+        const profile = validateCommunityProfile(body);
+        const taken = await db.prepare('SELECT id FROM community_users WHERE handle=? COLLATE NOCASE AND id!=?')
+          .bind(profile.handle, user.id).first();
+        if (taken) throw new CommunityError(409, 'That username is taken. Try another one.');
+        try {
+          const avatarJSON = JSON.stringify(profile.avatar);
+          const result = await db.prepare(`UPDATE community_users SET handle=?,
+            avatar_json=CASE WHEN ? THEN ? ELSE json_set(?, '$.skinTone', COALESCE(json_extract(avatar_json,'$.skinTone'),3)) END,
+            profile_completed=1,hide_stats_publicly=CASE WHEN ? THEN ? ELSE hide_stats_publicly END
+            WHERE id=? AND (profile_completed=0 OR handle=? COLLATE NOCASE)`)
+            .bind(profile.handle, body.avatar.skinTone !== undefined ? 1 : 0, avatarJSON, avatarJSON,
+              body.hideStatsPublicly !== undefined ? 1 : 0,body.hideStatsPublicly ? 1 : 0,user.id,profile.handle).run();
+          if (!result.meta.changes) throw new CommunityError(409, 'Your username is permanent. You can still change your character.');
+        } catch (error) {
+          if (String(error.message).includes('UNIQUE constraint failed')) throw new CommunityError(409, 'That username is taken. Try another one.');
+          throw error;
+        }
+      } else {
+        await db.prepare('UPDATE community_users SET hide_stats_publicly=? WHERE id=?').bind(body.hideStatsPublicly ? 1 : 0,user.id).run();
       }
     }
-    const row = await db.prepare('SELECT public_id,handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(user.id).first();
+    const row = await db.prepare('SELECT * FROM community_users WHERE id=?').bind(user.id).first();
     if (!row) throw new CommunityError(401, 'Please sign in with Apple again.');
-    return json(profileResponse(row,await accountRestriction(db,user.id)));
+    return json(await ownerProfile(db,row,await accountRestriction(db,user.id)));
+  }
+
+  const creatorMatch = path.match(/^\/v1\/community\/profiles\/([a-f0-9]{32})$/);
+  if (creatorMatch && method === 'GET') {
+    const viewer = await communityUser(request,env,false);
+    const author = await db.prepare('SELECT * FROM community_users WHERE public_id=?').bind(creatorMatch[1]).first();
+    if (!author) throw new CommunityError(404,'Profile not found.');
+    await checkViewerAccess(db,viewer,author.id);
+    const {limit,offset} = pageParameters(url);
+    const [page,count] = await db.batch([
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL}
+        FROM community_decks d JOIN community_users u ON u.id=d.owner_id
+        WHERE d.owner_id=? AND ${publicDeckSQL} ORDER BY d.published_at DESC,d.id DESC LIMIT ? OFFSET ?`)
+        .bind(viewer?.id || '',author.id,limit+1,offset),
+      db.prepare(`SELECT COUNT(*) AS total FROM community_decks d WHERE d.owner_id=? AND ${publicDeckSQL}`).bind(author.id)
+    ]);
+    return json({profile:{authorID:author.public_id,handle:author.handle,avatar:avatarResponse(author),
+      profileCreatedAt:profileCreatedAt(author),hideStatsPublicly:Boolean(author.hide_stats_publicly),
+      stats:author.hide_stats_publicly && viewer?.id!==author.id ? null : await creatorStats(db,author)},
+      decks:page.results.slice(0,limit).map(row=>deckResponse(row)),nextOffset:page.results.length>limit?offset+limit:null,totalCount:count.results[0].total});
+  }
+
+  if (path === '/v1/community/account/likes' && method === 'GET') {
+    const user = await communityUser(request,env,true,true);
+    const {limit,offset} = pageParameters(url);
+    const from = `FROM community_likes l JOIN community_decks d ON d.id=l.deck_id
+      JOIN community_users liker ON liker.id=l.user_id WHERE d.owner_id=? AND ${publicDeckSQL} AND ${validLikeSQL}`;
+    const [page,count,decks] = await db.batch([
+      db.prepare(`SELECT liker.public_id AS authorID,liker.handle,liker.avatar_json,d.id AS deckID,d.name AS deckName,l.created_at AS createdAt
+        ${from} ORDER BY l.created_at DESC,d.id DESC,liker.public_id DESC LIMIT ? OFFSET ?`).bind(user.id,limit+1,offset),
+      db.prepare(`SELECT COUNT(*) AS total ${from}`).bind(user.id),
+      db.prepare(`SELECT d.id AS deckID,d.name AS deckName,COUNT(*) AS likeCount ${from}
+        GROUP BY d.id,d.name ORDER BY likeCount DESC,d.name,d.id`).bind(user.id)
+    ]);
+    return json({likes:page.results.slice(0,limit).map(row=>({authorID:row.authorID,handle:row.handle,avatar:avatarResponse(row),deckID:row.deckID,deckName:row.deckName,createdAt:row.createdAt})),
+      totalCount:count.results[0].total,nextOffset:page.results.length>limit?offset+limit:null,deckCounts:decks.results});
+  }
+
+  const likeMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/like$`));
+  if (likeMatch && (method === 'PUT' || method === 'DELETE')) {
+    const user = await communityUser(request,env);
+    async function target() {
+      const row = await db.prepare(`SELECT d.* FROM community_decks d WHERE d.id=? AND ${publicDeckSQL}`).bind(likeMatch[1]).first();
+      if (!row) throw new CommunityError(404,'Deck not found.');
+      await checkViewerAccess(db,user,row.owner_id);
+      if (row.owner_id===user.id) throw new CommunityError(400,'You cannot heart your own deck.');
+      return row;
+    }
+    await target();
+    if (method === 'PUT' && !(await db.prepare('SELECT profile_completed FROM community_users WHERE id=?').bind(user.id).first())?.profile_completed) {
+      throw new CommunityError(409,'Finish your username and character in Settings before sending a heart.','PROFILE_INCOMPLETE');
+    }
+    const eligible = `${publicDeckSQL} AND d.owner_id!=? AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=? AND ${restrictedSQL})
+      AND NOT EXISTS(SELECT 1 FROM community_blocks b WHERE (b.viewer_id=? AND b.blocked_account_id=d.owner_id) OR (b.viewer_id=d.owner_id AND b.blocked_account_id=?))
+      AND EXISTS(SELECT 1 FROM community_users actor WHERE actor.id=? AND (?=0 OR actor.profile_completed=1))`;
+    if (method === 'PUT') {
+      try {
+        await db.prepare(`INSERT INTO community_likes(deck_id,user_id,created_at)
+          SELECT d.id,?,? FROM community_decks d WHERE d.id=? AND ${eligible}
+          ON CONFLICT(deck_id,user_id) DO NOTHING`).bind(user.id,now(),likeMatch[1],user.id,user.id,user.id,user.id,user.id,1).run();
+      } catch(error) {
+        if(String(error.message).includes('community_like_unavailable')) throw new CommunityError(404,'Deck not found.');
+        throw error;
+      }
+    } else {
+      await db.prepare(`DELETE FROM community_likes WHERE deck_id=? AND user_id=? AND EXISTS(SELECT 1 FROM community_decks d WHERE d.id=community_likes.deck_id AND ${eligible})`)
+        .bind(likeMatch[1],user.id,user.id,user.id,user.id,user.id,user.id,0).run();
+    }
+    await target();
+    const reaction = await db.prepare(`SELECT ${reactionColumnsSQL} FROM community_decks d WHERE d.id=?`).bind(user.id,likeMatch[1]).first();
+    return json({success:true,likeCount:reaction.like_count,viewerHasLiked:Boolean(reaction.viewer_has_liked)});
   }
 
   if (path === '/v1/community/account/decks' && method === 'GET') {
     const user = await communityUser(request, env,true,true);
     const offset = Math.max(0, Math.min(100000, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
-    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,u.public_id AS author_id,d.updated_at AS sort_at
+    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,u.public_id AS author_id,${reactionColumnsSQL},d.updated_at AS sort_at
       FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected') OR d.admin_action IS NOT NULL)
       UNION ALL
-      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,u.public_id,n.admin_updated_at
+      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,u.public_id,0,0,n.admin_updated_at
       FROM community_deck_notices n JOIN community_users u ON u.id=n.owner_id WHERE n.owner_id=?
-      ORDER BY sort_at DESC,id DESC LIMIT 51 OFFSET ?`).bind(user.id,user.id,offset).all();
+      ORDER BY sort_at DESC,id DESC LIMIT 51 OFFSET ?`).bind(user.id,user.id,user.id,offset).all();
     return json({ decks: results.slice(0,50).map(row => deckResponse(row,false,true)), nextOffset: results.length>50 ? offset+50 : null });
   }
 
@@ -191,12 +268,12 @@ async function handle(request, env) {
     ];
     if(encrypted)statements.push(db.prepare('INSERT INTO community_apple_tokens(user_id,encrypted_token,updated_at) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM community_users WHERE id=?) ON CONFLICT(user_id) DO UPDATE SET encrypted_token=excluded.encrypted_token,updated_at=excluded.updated_at').bind(id,encrypted,now(),id));
     await db.batch(statements);
-    const user = await db.prepare('SELECT public_id,handle,avatar_json,profile_completed FROM community_users WHERE id=?').bind(id).first();
+    const user = await db.prepare('SELECT * FROM community_users WHERE id=?').bind(id).first();
     if(!user) {
       if(encrypted) { const job={id:crypto.randomUUID(),encrypted_token:encrypted};await db.prepare('INSERT INTO community_apple_revocations(id,encrypted_token,created_at) VALUES(?,?,?)').bind(job.id,encrypted,now()).run();await revokeAppleJob(env,job); }
       throw new CommunityError(401,'This community account was removed.');
     }
-    return json({ token, expiresAt, appleRevocationAvailable: appleConfigured(env)&&Boolean(encrypted||await db.prepare('SELECT 1 FROM community_apple_tokens WHERE user_id=?').bind(id).first()), handle: user.handle, profile: profileResponse(user,await accountRestriction(db,id)) }, 201);
+    return json({ token, expiresAt, appleRevocationAvailable: appleConfigured(env)&&Boolean(encrypted||await db.prepare('SELECT 1 FROM community_apple_tokens WHERE user_id=?').bind(id).first()), handle: user.handle, profile: await ownerProfile(db,user,await accountRestriction(db,id)) }, 201);
   }
 
   if (path === '/v1/community/decks' && method === 'GET') {
@@ -214,12 +291,12 @@ async function handle(request, env) {
     const filter = `FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.status='published' AND d.review_status='approved' AND d.admin_hidden=0
       AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=d.owner_id AND ${restrictedSQL})
-      AND NOT EXISTS(SELECT 1 FROM community_blocks b WHERE b.viewer_id=? AND b.blocked_account_id=d.owner_id) AND (?='' OR d.category_tag=? COLLATE NOCASE)
+      AND NOT EXISTS(SELECT 1 FROM community_blocks b WHERE (b.viewer_id=? AND b.blocked_account_id=d.owner_id) OR (b.viewer_id=d.owner_id AND b.blocked_account_id=?)) AND (?='' OR d.category_tag=? COLLATE NOCASE)
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
-    const parameters = [viewer?.id||'',category, category, search, pattern, pattern, pattern];
+    const parameters = [viewer?.id||'',viewer?.id||'',category, category, search, pattern, pattern, pattern];
     const [page, count] = await db.batch([
-      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
-        .bind(...parameters, limit + 1, offset),
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
+        .bind(viewer?.id||'',...parameters, limit + 1, offset),
       db.prepare(`SELECT COUNT(*) AS total ${filter}`).bind(...parameters)
     ]);
     return json({ decks: page.results.slice(0, limit).map(row => deckResponse(row)),
@@ -311,10 +388,11 @@ async function handle(request, env) {
 
   const previewMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/preview$`));
   if (previewMatch && method === 'GET') {
-    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id FROM community_decks d
-      JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(previewMatch[1]).first();
+    const viewer = await communityUser(request,env,false);
+    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} FROM community_decks d
+      JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(viewer?.id||'',previewMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Deck not found.');
-    await checkViewerAccess(db,await communityUser(request,env,false),row.owner_id);
+    await checkViewerAccess(db,viewer,row.owner_id);
     const deck = deckResponse(row, true);
     deck.cards = deck.cards.slice(0, 5);
     return json({ deck });
@@ -324,9 +402,10 @@ async function handle(request, env) {
   if (deckMatch) {
     const id = deckMatch[1];
     if (method === 'GET') {
-      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(id).first();
+      const viewer = await communityUser(request,env,false);
+      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(viewer?.id||'',id).first();
       if (!row) throw new CommunityError(404, 'Deck not found.');
-      await checkViewerAccess(db,await communityUser(request,env,false),row.owner_id);
+      await checkViewerAccess(db,viewer,row.owner_id);
       await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0").bind(id).run();
       return json({ deck: deckResponse({ ...row, download_count: row.download_count + 1 }, true) });
     }

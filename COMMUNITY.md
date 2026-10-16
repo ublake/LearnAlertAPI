@@ -43,8 +43,10 @@ All paths start with `/v1/community`.
 | GET | `/account` | Bearer session; current public profile |
 | PUT | `/account` | Bearer session; username and character choices |
 | GET | `/account/decks` | Bearer session; own published, pending, and rejected decks |
+| GET | `/account/likes?limit=20&offset=0` | Bearer session; own received-heart identities and chart counts |
 | DELETE | `/account` | Bearer session; removes account and public content |
 | GET | `/decks?q=&category=&offset=&limit=` | Public approved summaries and `nextOffset` |
+| GET | `/profiles/:authorID?limit=20&offset=0` | Public creator identity/profile statistics and published decks |
 | POST | `/decks/drafts` | Bearer session; returns deck ID |
 | POST | `/decks/:id/media` | Owner; raw binary body and allowed Content-Type |
 | PUT/PATCH | `/decks/:id` | Owner; complete snapshot; HTTP 202 pending review |
@@ -53,6 +55,7 @@ All paths start with `/v1/community`.
 | GET/HEAD | `/media/:id` | Public if referenced by an approved visible published deck; otherwise owner |
 | DELETE | `/decks/:id` | Owner; removes public copy |
 | POST | `/decks/:id/reports` | Signed-in user; JSON `reason` |
+| PUT/DELETE | `/decks/:id/like` | Signed-in non-owner; idempotently heart/unheart an available deck |
 
 Submission succeeds with HTTP 202 and `{ id, success: true, reviewStatus: "pending", submittedAt, message: "Review can take up to 3 days." }`. Owner deck summaries include optional `reviewStatus` (`pending`, `approved`, or `rejected`), `reviewMessage` (rejection reason or null), and `submittedAt` (epoch seconds or null). Resubmission clears an old rejection reason. Pending/rejected cards and referenced media remain private and are retained until removed by the owner/admin.
 
@@ -158,6 +161,68 @@ Account deletion continues to remove the profile and release its username.
 ## Author moderation notices
 
 Authenticated GET /account/decks returns current saved metadata and optional status, adminNote, adminAction, adminUpdatedAt and isHidden. Notes are not returned by public browse/preview/download endpoints. App resubmissions cannot replace these admin-owned fields. Admin hard-deletion leaves a minimal Removed notice without cards/media; DELETE /decks/:id dismisses only the caller's notice. Account/profile deletion removes all their notices. Follow nextOffset with ?offset=... when refreshing; pages contain at most 50 rows ordered by latest update, then ID.
+
+## Creator profiles and appreciation
+
+Apply migration **0012_creator_profiles_likes.sql** before deploying these routes.
+`GET /profiles/:authorID` uses the existing opaque, public author ID, never an
+Apple account ID. It returns `{profile,decks,nextOffset,totalCount}`. The profile
+contains `authorID`, `handle`, `avatar`, `profileCreatedAt` (Unix seconds),
+`hideStatsPublicly`, and `stats`. The deck page contains only approved, published,
+visible decks; drafts, rejection messages, private card contents, and hidden or
+removed decks never enter this list. `totalCount` is the public deck count.
+Pages default to 20, cap at 50, and use `offset`/`nextOffset`.
+
+`stats` contains `profileCreatedAt`, `createdDeckCount`, `publishedDeckCount`,
+`downloadCount`, `receivedLikeCount`, and `hasReceivedLikes`. Created decks count
+all nondeleted server-side community drafts/submissions, not private decks in a
+device's library. Only that aggregate is public, not unpublished deck metadata.
+Published/download/heart totals count currently approved visible publications.
+Profile age starts at the first completed username/avatar profile. Legacy users
+retain the account creation date as a fallback; this is not an app installation
+date. Later profile edits and sign-ins do not reset it.
+
+`PUT /account` accepts `hideStatsPublicly: true|false` on its own or alongside
+the existing username/avatar fields. Omitted privacy values preserve the saved
+choice. Public profile responses send **`stats: null`** when hidden; the owner
+still receives their statistics from `/account` and their own profile. Profile
+identity, profile creation date, public decks, and each public deck's individual
+download/heart counts remain public. Username immutability is unchanged.
+The owner account and Apple sign-in profile responses add the same creation
+date, privacy setting, and private statistics fields.
+
+Every deck payload adds `likeCount` and `viewerHasLiked` (false anonymously).
+`PUT /decks/:id/like` and `DELETE /decks/:id/like` need a valid active bearer
+session and no request body. They return
+`{success:true,likeCount:2,viewerHasLiked:true}` (or false after removal).
+Only approved, visible, published decks can receive hearts; creators cannot
+heart their own decks. Sending a heart also requires a completed username/avatar
+profile; incomplete accounts receive HTTP 409 / `PROFILE_INCOMPLETE` and can finish
+their profile in Settings. Removing a previous heart does not require profile
+completion. A unique `(deck_id,user_id)` key and conditional writes
+make retries/concurrent duplicate hearts idempotent. Database triggers reject
+unavailable, own, restricted, or blocked relationships and atomically record
+the creator's first successful received heart. `hasReceivedLikes` stays true
+after the last heart is removed so the app can retain the appreciation viewer.
+Rejected writes do not unlock it. No push notification is sent.
+
+`GET /account/likes` is owner-only and returns
+`{likes,totalCount,nextOffset,deckCounts}`. Each like contains the sender's public
+`authorID`, `handle`, `avatar`, `deckID`, `deckName`, and `createdAt` Unix seconds.
+Identities are never a public list. The page defaults to 20 (maximum 50), sorted
+by newest heart then stable deck/author IDs. `deckCounts` covers the entire
+filtered ledger as `{deckID,deckName,likeCount}` rows, independent of its current
+page, for a chart. Caller-supplied author IDs cannot select another owner's data.
+
+Active account restrictions, missing/deleted profiles, unavailable decks, and
+either direction of an owner/liker block exclude both like identities and their
+aggregate contribution. Blocking also hides public profile/deck access between
+the two signed-in accounts, including feed results. Unblocking or restoring an
+account/deck restores retained hearts; unhearting removes the record. Hard deck
+or account deletion cascades its heart records; deleting a creator's account
+also clears their first-heart history. Existing download-based Popular ordering
+and Recent ordering are unchanged. The public profile privacy toggle does not
+make a deliberately sent heart anonymous to its recipient.
 
 ## Blocking and account restrictions
 

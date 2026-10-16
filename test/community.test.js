@@ -83,8 +83,11 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal((await request('account', 'PUT', { username: 'buddy', avatar: { hair: 16, eyes: 0, mouth: 0 } }, ownerToken)).status, 400);
     const profile = { username: 'Funny_Buddy', avatar: { hair: 5, eyes: 4, mouth: 3 } };
     assert.equal((await request('account', 'PUT', profile, ownerToken)).status, 200);
+    const ownerCreatedAt = (await db.prepare("SELECT profile_created_at FROM community_users WHERE id='owner'").first()).profile_created_at;
     assert.deepEqual(await (await request('account', 'GET', undefined, ownerToken)).json(), {
-      accountStatus: 'active', restrictionMessage: null, authorID: (await db.prepare("SELECT public_id FROM community_users WHERE id='owner'").first()).public_id, handle: '@funny_buddy', avatar: { ...profile.avatar, skinTone: 3 }, isComplete: true
+      accountStatus: 'active', restrictionMessage: null, authorID: (await db.prepare("SELECT public_id FROM community_users WHERE id='owner'").first()).public_id, handle: '@funny_buddy', avatar: { ...profile.avatar, skinTone: 3 }, isComplete: true,
+      profileCreatedAt: ownerCreatedAt, hideStatsPublicly: false,
+      stats: {profileCreatedAt:ownerCreatedAt,createdDeckCount:0,publishedDeckCount:0,downloadCount:0,receivedLikeCount:0,hasReceivedLikes:false}
     });
     assert.equal((await request('account', 'PUT', { ...profile, username: '@FUNNY_BUDDY' }, otherToken)).status, 409);
     assert.equal((await request('account', 'GET', undefined, otherToken)).status, 200);
@@ -292,12 +295,15 @@ test('Apple sign-in restores a saved profile after its original generated userna
     assert.deepEqual(first.profile.avatar, { hair: 0, eyes: 0, mouth: 0, skinTone: 3 });
     const updated = await mf.dispatchFetch('https://api.example.test/v1/community/account', { method: 'PUT', headers: { Authorization: `Bearer ${first.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 } }) });
     assert.equal(updated.status, 200);
+    const updatedProfile = await updated.json();
     await db.prepare('INSERT INTO community_users(id,handle,created_at) VALUES(?,?,?)').bind('another-account', first.handle, 1).run();
     const secondResponse = await signIn();
     assert.equal(secondResponse.status, 201);
     const second = await secondResponse.json();
     assert.equal(second.handle, '@funny_buddy');
-    assert.deepEqual(second.profile, { accountStatus: 'active', restrictionMessage: null, authorID: first.profile.authorID, handle: '@funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 }, isComplete: true });
+    assert.deepEqual(second.profile, { accountStatus: 'active', restrictionMessage: null, authorID: first.profile.authorID, handle: '@funny_buddy', avatar: { hair: 2, eyes: 4, mouth: 5, skinTone: 0 }, isComplete: true,
+      profileCreatedAt:updatedProfile.profileCreatedAt,hideStatsPublicly:false,
+      stats:{profileCreatedAt:updatedProfile.profileCreatedAt,createdDeckCount:0,publishedDeckCount:0,downloadCount:0,receivedLikeCount:0,hasReceivedLikes:false} });
     assert.notEqual(second.token, first.token);
     const restored = await mf.dispatchFetch('https://api.example.test/v1/community/account', { headers: { Authorization: `Bearer ${second.token}` } });
     assert.deepEqual(await restored.json(), second.profile);

@@ -79,5 +79,5 @@ export async function checkAccountRestriction(db,id) {
 }
 export async function checkViewerAccess(db,viewer,ownerID) {
   if(await db.prepare(`SELECT 1 FROM community_account_restrictions r WHERE r.account_id=? AND ${restrictedSQL}`).bind(ownerID).first()) throw new CommunityError(404,'This community content is unavailable.');
-  if(viewer && await db.prepare('SELECT 1 FROM community_blocks WHERE viewer_id=? AND blocked_account_id=?').bind(viewer.id,ownerID).first()) throw new CommunityError(403,'You blocked this author. Unblock them to view their community decks.','AUTHOR_BLOCKED');
+  if(viewer && await db.prepare('SELECT 1 FROM community_blocks WHERE (viewer_id=? AND blocked_account_id=?) OR (viewer_id=? AND blocked_account_id=?)').bind(viewer.id,ownerID,ownerID,viewer.id).first()) throw new CommunityError(403,'These community profiles cannot interact while a block is active.','AUTHOR_BLOCKED');
 }
