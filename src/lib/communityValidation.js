@@ -98,15 +98,17 @@ export function validateCommunityDeck(body) {
       throw new CommunityError(400, 'Matching cards need at least two complete pairs.');
     }
     const promptImageID = mediaID(card.promptImageID);
+    const answerImageID = mediaID(card.answerImageID);
     const promptAudioID = mediaID(card.promptAudioID);
     if (!Array.isArray(card.optionImageIDs ?? []) || (card.optionImageIDs ?? []).length > options.length) {
       throw new CommunityError(400, 'Invalid answer images.');
     }
     const optionImageIDs = (card.optionImageIDs ?? []).map(mediaID);
     if (imageOnly && (!promptImageID || question || correctAnswer || hint || options.length || left.length || right.length || optionImageIDs.length || promptAudioID)) {
-      throw new CommunityError(400, 'Image cards need one image and no question, answer, hint, choices, matching pairs, or audio.');
+      throw new CommunityError(400, 'Image cards need a front image, an optional back image, and no question, answer, hint, choices, matching pairs, or audio.');
     }
-    for (const image of [promptImageID, ...optionImageIDs].filter(Boolean)) {
+    if (!imageOnly && answerImageID) throw new CommunityError(400, 'Back images are supported only on image cards.');
+    for (const image of [promptImageID, answerImageID, ...optionImageIDs].filter(Boolean)) {
       if (media.get(image) === 'audio') throw new CommunityError(400, 'Invalid media type.');
       media.set(image, 'image');
     }
@@ -116,7 +118,7 @@ export function validateCommunityDeck(body) {
     }
     return { id, question, correctAnswer, options, hint,
       cardType: card.cardType, matchingLeftItems: left, matchingRightItems: right,
-      sectionName: text(card.sectionName ?? '', 120, 'Section'), promptImageID, optionImageIDs, promptAudioID };
+      sectionName: text(card.sectionName ?? '', 120, 'Section'), promptImageID, answerImageID, optionImageIDs, promptAudioID };
   });
   return { metadata, cards, media };
 }

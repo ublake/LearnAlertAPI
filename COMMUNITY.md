@@ -64,12 +64,16 @@ decks allow an additional 100 MiB of staging space during replacement uploads.
 Users can have 50 active shared decks and create at most 20 per day. JSON bodies
 are capped at 1 MiB. These limits apply server-side, including streamed uploads.
 
-Image-only cards use `cardType: "images"` with one `promptImageID`. Question,
-answer, and hint are empty (or omitted); choices, matching pairs, option images,
-and audio are not permitted. The image must already be uploaded to that deck.
-The existing private review, public media access, ownership, and removal rules
-apply. No database migration is needed for this card type. Deploy this Worker
-before distributing an app build that publishes image-only cards.
+Image-only cards use `cardType: "images"` with a required front `promptImageID`
+and an optional back `answerImageID`. With no back, the front is a review card;
+with a back, the app reveals the second picture. Question, answer, and hint are
+empty (or omitted); choices, matching pairs, option images, and audio are not
+permitted. Both images must already be uploaded to that deck. Back images are
+not accepted on other card types. The existing private review, public media
+access, ownership, and removal rules apply. Migration 0011 adds back images to
+the atomic publication/submission attachment guards; apply it before deploying
+this Worker or distributing an app build that publishes front/back image cards.
+Existing single-image cards remain valid.
 
 Duplicate text-deck checks still compare normalized card text. Image-only cards
 are excluded from that fingerprint, and at least three text cards are required;
