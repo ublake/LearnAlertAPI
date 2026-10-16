@@ -64,6 +64,19 @@ decks allow an additional 100 MiB of staging space during replacement uploads.
 Users can have 50 active shared decks and create at most 20 per day. JSON bodies
 are capped at 1 MiB. These limits apply server-side, including streamed uploads.
 
+Image-only cards use `cardType: "images"` with one `promptImageID`. Question,
+answer, and hint are empty (or omitted); choices, matching pairs, option images,
+and audio are not permitted. The image must already be uploaded to that deck.
+The existing private review, public media access, ownership, and removal rules
+apply. No database migration is needed for this card type. Deploy this Worker
+before distributing an app build that publishes image-only cards.
+
+Duplicate text-deck checks still compare normalized card text. Image-only cards
+are excluded from that fingerprint, and at least three text cards are required;
+unrelated photo decks must not collide because both have empty text. Media has
+no stored content hash, so the text fingerprint does not detect copied images.
+Built-in/community provenance restrictions and upload ownership remain enforced.
+
 Daily cleanup at 04:17 UTC expires sessions, removes abandoned drafts after
 24 hours (excluding submitted pending/rejected and admin-created drafts), and deletes up to 500 removed or old unused media objects per run.
 Reports are stored in `community_reports`; they are not automatically moderated.

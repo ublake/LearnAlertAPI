@@ -81,11 +81,13 @@ export function validateCommunityDeck(body) {
     const id = text(card.id, 64, 'Card ID', true);
     if (ids.has(id)) throw new CommunityError(400, 'Card IDs must be unique.');
     ids.add(id);
-    if (!['vocabulary','multiple_choice','tap_reveal','matching','fill_blank'].includes(card.cardType)) {
+    if (!['vocabulary','multiple_choice','tap_reveal','matching','fill_blank','images'].includes(card.cardType)) {
       throw new CommunityError(400, 'Invalid card type.');
     }
-    const question = text(card.question, 5000, 'Question', true);
-    const correctAnswer = text(card.correctAnswer ?? '', 10000, 'Answer', card.cardType !== 'matching');
+    const imageOnly = card.cardType === 'images';
+    const question = text(imageOnly ? card.question ?? '' : card.question, 5000, 'Question', !imageOnly);
+    const correctAnswer = text(card.correctAnswer ?? '', 10000, 'Answer', !imageOnly && card.cardType !== 'matching');
+    const hint = text(card.hint ?? '', 2000, 'Hint');
     const options = strings(card.options ?? [], 4, 5000, 'answer choices');
     const left = strings(card.matchingLeftItems ?? [], 20, 5000, 'matching items');
     const right = strings(card.matchingRightItems ?? [], 20, 5000, 'matching items');
@@ -101,6 +103,9 @@ export function validateCommunityDeck(body) {
       throw new CommunityError(400, 'Invalid answer images.');
     }
     const optionImageIDs = (card.optionImageIDs ?? []).map(mediaID);
+    if (imageOnly && (!promptImageID || question || correctAnswer || hint || options.length || left.length || right.length || optionImageIDs.length || promptAudioID)) {
+      throw new CommunityError(400, 'Image cards need one image and no question, answer, hint, choices, matching pairs, or audio.');
+    }
     for (const image of [promptImageID, ...optionImageIDs].filter(Boolean)) {
       if (media.get(image) === 'audio') throw new CommunityError(400, 'Invalid media type.');
       media.set(image, 'image');
@@ -109,7 +114,7 @@ export function validateCommunityDeck(body) {
       if (media.get(promptAudioID) === 'image') throw new CommunityError(400, 'Invalid media type.');
       media.set(promptAudioID, 'audio');
     }
-    return { id, question, correctAnswer, options, hint: text(card.hint ?? '', 2000, 'Hint'),
+    return { id, question, correctAnswer, options, hint,
       cardType: card.cardType, matchingLeftItems: left, matchingRightItems: right,
       sectionName: text(card.sectionName ?? '', 120, 'Section'), promptImageID, optionImageIDs, promptAudioID };
   });
@@ -162,8 +167,13 @@ export function validateCommunityProfile(body) {
 
 // Ignore names, card IDs, ordering, and formatting so renaming a public deck does not make it original.
 export function communityContentSignature(cards) {
+  // Image uploads have no stable content hash in the media schema. Their empty
+  // text must not make unrelated photo decks look like copies of each other.
+  // Provenance and attachment ownership checks still apply to every image card.
+  const textCards = cards.filter(card => card.cardType !== 'images');
+  if (textCards.length < 3) return null;
   const normalize = value => String(value ?? '').normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
-  return JSON.stringify(cards.map(card => JSON.stringify([
+  return JSON.stringify(textCards.map(card => JSON.stringify([
     normalize(card.question), normalize(card.correctAnswer),
     (card.matchingLeftItems ?? []).map((left, index) => [normalize(left), normalize(card.matchingRightItems?.[index])]).sort()
   ])).sort());
@@ -173,6 +183,7 @@ export async function rejectCommunityRepublication(db, cards, ownerID) {
   // A single common fact is not enough evidence of copying; tracked downloads are blocked by provenance.
   if (cards.length < 3) return;
   const signature = communityContentSignature(cards);
+  if (!signature) return;
   let afterID = '';
   while (true) {
     const { results } = await db.prepare(`SELECT id,cards_json FROM community_decks
