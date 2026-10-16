@@ -175,8 +175,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     const replacementID = (await replacementResponse.json()).id;
     assert.equal((await request(`media/${replacementID}`)).status, 404);
     const oversized = structuredClone(payload);
-    oversized.cards[0].optionImageIDs = [replacementID];
-    oversized.cards[0].options = ['Example'];
+    oversized.cards[0].answerImageID = replacementID;
     assert.equal((await request(`decks/${id}`, 'PUT', oversized, ownerToken)).status, 413);
     const updated = structuredClone(payload);
     updated.cards[0].promptImageID = replacementID;

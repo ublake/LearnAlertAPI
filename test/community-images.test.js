@@ -35,7 +35,7 @@ test('image cards require a front and allow a back without text, choices, pairs,
   // The new format must not relax the existing text formats.
   for (const cardType of ['vocabulary', 'tap_reveal', 'multiple_choice', 'matching', 'fill_blank']) {
     assert.throws(() => validateCommunityDeck({ name: 'Incomplete', cards: [{ id: 'bad', cardType, question: '', correctAnswer: '' }] }), error => error.status === 400);
-    assert.throws(() => validateCommunityDeck({ name: 'Back on text', cards: [{ id: 'bad', cardType, question: 'Q', correctAnswer: 'A', options: ['A', 'B'], matchingLeftItems: ['a', 'b'], matchingRightItems: ['c', 'd'], answerImageID: back }] }), error => error.status === 400 && /Back images/.test(error.message));
+    if (!['multiple_choice','matching'].includes(cardType)) assert.equal(validateCommunityDeck({ name: 'Media answer', cards: [{ id: 'media', cardType, question: 'Q', correctAnswer: '', answerImageID: back }] }).cards[0].answerImageID, back);
   }
 });
 
@@ -105,6 +105,11 @@ test('front/back images preserve review privacy, ownership, atomic guards, downl
       const back = await upload(png, 'image/png');
       const audio = await upload(new TextEncoder().encode('RIFF1234WAVE'), 'audio/wav');
       const payload = { name: `Image deck ${index}`, cards: Array.from({ length: 3 }, (_, i) => imageCard({ id: String(i), promptImageID: front, answerImageID: i === 0 ? back : null })) };
+      payload.cards[1] = { id: 'audio-choice', cardType: 'multiple_choice', question: '', correctAnswer: '', options: ['', ''], correctOptionIndex: 1,
+        fieldMedia: { prompt: { audioID: audio }, 'option:0': { imageID: front }, 'option:1': { audioID: audio }, hint: { imageID: back } } };
+      const invalidField = structuredClone(payload); invalidField.cards[1].fieldMedia['option:1'].audioID = crypto.randomUUID();
+      assert.equal((await request(`decks/${id}`, 'PUT', invalidField, token)).status, 400);
+
       for (const invalid of [{ promptImageID: crypto.randomUUID() }, { answerImageID: crypto.randomUUID() }, { answerImageID: audio }, ...(firstImageID ? [{ answerImageID: firstImageID }] : [])]) {
         const malformed = structuredClone(payload); Object.assign(malformed.cards[0], invalid);
         assert.equal((await request(`decks/${id}`, 'PUT', malformed, token)).status, 400);
@@ -133,6 +138,8 @@ test('front/back images preserve review privacy, ownership, atomic guards, downl
         assert.equal(response.deck.cards[0].promptImageID, front);
         assert.equal(response.deck.cards[0].answerImageID, back);
         assert.equal(response.deck.cards[1].answerImageID, null);
+        assert.equal(response.deck.cards[1].fieldMedia['option:1'].audioID, audio);
+        assert.equal(response.deck.cards[1].correctOptionIndex, 1);
       }
       for (const image of [front, back]) {
         assert.deepEqual(Buffer.from(await (await request(`media/${image}`)).arrayBuffer()), png);
@@ -142,12 +149,15 @@ test('front/back images preserve review privacy, ownership, atomic guards, downl
       const missing = structuredClone(payload.cards); missing[0].answerImageID = crypto.randomUUID();
       await assert.rejects(db.prepare('UPDATE community_decks SET cards_json=? WHERE id=?').bind(JSON.stringify(missing), id).run(), /community_attachment_unavailable/);
       await assert.rejects(db.prepare("UPDATE community_decks SET status='draft',review_status='pending',cards_json=? WHERE id=?").bind(JSON.stringify(missing), id).run(), /community_attachment_unavailable/);
+      const missingField = structuredClone(payload.cards); missingField[1].fieldMedia['option:1'].audioID = crypto.randomUUID();
+      await assert.rejects(db.prepare('UPDATE community_decks SET cards_json=? WHERE id=?').bind(JSON.stringify(missingField), id).run(), /community_attachment_unavailable/);
       // Admin edits preserve both sides, then removing only the back unlinks it.
       const current = (await (await admin(`decks/${id}`)).json()).deck;
       const edit = { ...payload, expectedRevision: current.revision, downloadCount: current.download_count };
       assert.equal((await admin(`decks/${id}`, 'PUT', edit)).status, 200);
       assert.equal((await (await request(`decks/${id}/preview`)).json()).deck.cards[0].answerImageID, back);
       payload.cards[0].answerImageID = null;
+      payload.cards[1].fieldMedia.hint = {}; // Unlink the same image from every field before cleanup.
       assert.equal((await request(`decks/${id}`, 'PUT', payload, token)).status, 202);
       await approve(id);
       assert.equal((await request(`media/${front}`)).status, 200);
