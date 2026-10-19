@@ -58,7 +58,7 @@ export async function communityUser(request, env, required = true, allowRestrict
   const token = authorization.match(/^Bearer ([a-f0-9]{64})$/i)?.[1];
   if (token) {
     const row = await env.COMMUNITY_DB.prepare(
-      'SELECT u.id, u.handle, u.public_id FROM community_sessions s JOIN community_users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?'
+      'SELECT u.id, u.handle, u.public_id, u.is_developer, u.developer_anki_uploads FROM community_sessions s JOIN community_users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?'
     ).bind(await sha256(token), Math.floor(Date.now() / 1000)).first();
     if (row) {
       if (!allowRestricted) await checkAccountRestriction(env.COMMUNITY_DB,row.id);

@@ -29,9 +29,9 @@ export async function readLimitedBody(request, maximum) {
   return bytes;
 }
 
-export async function readCommunityJSON(request, allowEmpty = false) {
+export async function readCommunityJSON(request, allowEmpty = false, maximum = 1024 * 1024) {
   if(allowEmpty && !request.body)return {};
-  const bytes = await readLimitedBody(request, 1024 * 1024);
+  const bytes = await readLimitedBody(request, maximum);
   if(allowEmpty && !bytes.length)return {};
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new CommunityError(400, 'Request body must be valid JSON.'); }
@@ -53,9 +53,11 @@ function mediaID(value) {
   return value;
 }
 
-export function deckMetadata(body) {
+export const ankiUploadMessage = 'Uploading decks imported from Anki are not supported yet';
+export function deckMetadata(body, developer = false) {
   if (!body || typeof body !== 'object') throw new CommunityError(400, 'Invalid deck.');
-  if ((body.origin !== undefined && body.origin !== 'personal') || body.sourceCommunityID || body.sourcePremadeID || String(body.deckType).toLowerCase() === 'course') {
+  if ((body.origin === 'anki' || body.sourceAnkiDeckID || String(body.deckType).toLowerCase() === 'anki') && !developer) throw new CommunityError(403, ankiUploadMessage);
+  if ((body.origin !== undefined && !['personal','anki'].includes(body.origin)) || body.sourceCommunityID || body.sourcePremadeID || String(body.deckType).toLowerCase() === 'course') {
     throw new CommunityError(403, 'Share a deck you created. Built-in and downloaded community decks can’t be republished.');
   }
   const colorHex = text(body.colorHex ?? '#5B70E0', 7, 'Deck color');
@@ -69,18 +71,46 @@ export function deckMetadata(body) {
   };
 }
 
-export function validateCommunityDeck(body) {
-  const metadata = deckMetadata(body);
+export function validateCommunityDeck(body, developer = false) {
+  const metadata = deckMetadata(body, developer);
+  const publisherHandle = body.publisherHandle ? text(body.publisherHandle, 80, 'Creator name', true) : null;
+  if (publisherHandle && !developer) throw new CommunityError(403, 'Custom publishing names require developer access.');
+  const ankiMedia = {};
+  const rawAnkiMedia = body.ankiMedia ?? {};
+  if (!rawAnkiMedia || typeof rawAnkiMedia !== 'object' || Array.isArray(rawAnkiMedia)) throw new CommunityError(400, 'Invalid Anki media.');
+  if (Object.keys(rawAnkiMedia).length && !developer) throw new CommunityError(403, ankiUploadMessage);
   if (!Array.isArray(body.cards) || body.cards.length < 1 || body.cards.length > 500) {
     throw new CommunityError(400, 'Publish between 1 and 500 cards per deck.');
   }
   const ids = new Set();
   const media = new Map();
+  for (const [folder, files] of Object.entries(rawAnkiMedia)) {
+    if (!/^[a-f0-9-]{36}$/i.test(folder) || !files || typeof files !== 'object' || Array.isArray(files)) throw new CommunityError(400, 'Invalid Anki media folder.');
+    const clean = {};
+    for (const [name, value] of Object.entries(files)) {
+      if (!name || name.length > 255 || name === '.' || name === '..' || /[/\\\x00-\x1f]/.test(name) || ['__proto__','constructor','prototype'].includes(name)) throw new CommunityError(400, 'Invalid Anki media name.');
+      const id = mediaID(value);
+      if (!id) throw new CommunityError(400, 'Missing Anki media reference.');
+      clean[name] = id; media.set(id, 'anki');
+      if (media.size > 1000) throw new CommunityError(413, 'Anki decks support up to 1,000 attachments.');
+    }
+    ankiMedia[folder] = clean;
+  }
   const cards = body.cards.map(card => {
     if (!card || typeof card !== 'object') throw new CommunityError(400, 'Invalid card.');
     const id = text(card.id, 64, 'Card ID', true);
     if (ids.has(id)) throw new CommunityError(400, 'Card IDs must be unique.');
     ids.add(id);
+    if (card.cardType === 'anki' || card.ankiContent) {
+      if (!developer) throw new CommunityError(403, ankiUploadMessage);
+      if (card.cardType !== 'anki') throw new CommunityError(400, 'Anki templates require the Anki card type.');
+      const content = card.ankiContent;
+      if (!content || typeof content !== 'object' || !/^[a-f0-9-]{36}$/i.test(content.mediaFolder) || !Number.isInteger(content.templateOrdinal) || content.templateOrdinal < 0 || content.templateOrdinal > 1000) throw new CommunityError(400, 'Invalid Anki template.');
+      return { id, cardType: 'anki', question: text(card.question ?? '', 5000, 'Question'), correctAnswer: text(card.correctAnswer ?? '', 10000, 'Answer'),
+        options: [], hint: '', matchingLeftItems: [], matchingRightItems: [], optionImageIDs: [], sectionName: text(card.sectionName ?? '',120,'Section'),
+        ankiContent: { frontHTML: text(content.frontHTML, 200000, 'Anki front'), backHTML: text(content.backHTML, 200000, 'Anki back'), css: text(content.css ?? '',100000,'Anki styles'),
+          mediaFolder: content.mediaFolder, templateOrdinal: content.templateOrdinal, noteType: text(content.noteType ?? '',120,'Anki note type'), tags: strings(content.tags ?? [],100,120,'Anki tags') } };
+    }
     if (!['vocabulary','multiple_choice','tap_reveal','matching','fill_blank','images'].includes(card.cardType)) {
       throw new CommunityError(400, 'Invalid card type.');
     }
@@ -140,7 +170,11 @@ export function validateCommunityDeck(body) {
       promptImageID: fieldMedia.prompt?.imageID ?? null, answerImageID: fieldMedia.answer?.imageID ?? null,
       optionImageIDs: options.map((_, i) => fieldMedia[`option:${i}`]?.imageID ?? null), promptAudioID: fieldMedia.prompt?.audioID ?? null };
   });
-  return { metadata, cards, media };
+  const usedFolders = new Set(cards.flatMap(card => card.ankiContent ? [card.ankiContent.mediaFolder] : []));
+  for (const folder of Object.keys(ankiMedia)) if (!usedFolders.has(folder)) delete ankiMedia[folder];
+  const usedAnkiMedia = new Set(Object.values(ankiMedia).flatMap(files => Object.values(files)));
+  for (const [id, kind] of media) if (kind === 'anki' && !usedAnkiMedia.has(id)) media.delete(id);
+  return { metadata, cards, media, ankiMedia, publisherHandle };
 }
 
 export const MEDIA_TYPES = {

@@ -172,5 +172,18 @@ test('front/back images preserve review privacy, ownership, atomic guards, downl
     for (const [index, id] of deckIDs.entries()) assert.equal((await request(`decks/${id}`, 'DELETE', undefined, tokens[index])).status, 200);
     await cleanupCommunity(await mf.getBindings());
     for (const key of mediaKeys) assert.equal(await bucket.head(key), null);
+
+    // Developer Anki submissions still go through the same signed admin review.
+    await db.prepare("UPDATE community_users SET is_developer=1,developer_anki_uploads=1 WHERE id='image-owner-0'").run();
+    const ankiDraft = await (await request('decks/drafts','POST',{name:'Developer Anki',deckType:'Anki'},tokens[0])).json();
+    const group = crypto.randomUUID();
+    const uploaded = await request(`decks/${ankiDraft.id}/media`,'POST',new Uint8Array([1,2,3]),tokens[0],'application/octet-stream');
+    const ankiMedia = await uploaded.json();
+    const submission = await request(`decks/${ankiDraft.id}`,'PUT',{name:'Developer Anki',deckType:'Anki',origin:'anki',
+      cards:[{id:'anki-review',cardType:'anki',question:'Front',correctAnswer:'Back',ankiContent:{frontHTML:'Front',backHTML:'Back',css:'',mediaFolder:group,templateOrdinal:0,noteType:'Basic',tags:[]}}],
+      ankiMedia:{[group]:{'tone.wav':ankiMedia.id}}},tokens[0]);
+    assert.equal(submission.status,202,await submission.text());
+    await approve(ankiDraft.id);
+    assert.equal((await request(`decks/${ankiDraft.id}`)).status,200);
   } finally { await mf.dispose(); }
 });

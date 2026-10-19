@@ -23,17 +23,18 @@ function profileResponse(row,restriction=null) {
 }
 async function ownerProfile(db, row, restriction = null) {
   return { ...profileResponse(row,restriction), profileCreatedAt: profileCreatedAt(row),
-    hideStatsPublicly: Boolean(row.hide_stats_publicly), stats: await creatorStats(db,row) };
+    hideStatsPublicly: Boolean(row.hide_stats_publicly),
+    ...(row.is_developer ? { isDeveloper: true, allowAnkiUploads: Boolean(row.developer_anki_uploads) } : {}), stats: await creatorStats(db,row) };
 }
 function deckResponse(row, detail = false, owner = false) {
-  return { id: row.id, authorID: row.author_id, name: row.name, description: row.description, authorHandle: row.handle,
+  return { id: row.id, authorID: row.author_id, name: row.name, description: row.description, authorHandle: row.publisher_handle || row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
     cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
     likeCount: row.like_count ?? 0, viewerHasLiked: Boolean(row.viewer_has_liked),
     ...(row.review_status ? { reviewStatus: row.review_status } : {}),
     reviewMessage: row.review_message ?? null, submittedAt: row.submitted_at ?? null,
     ...(owner ? { status: row.status, adminNote: row.admin_note ?? null, adminAction: row.admin_action ?? null, adminUpdatedAt: row.admin_updated_at ?? null, isHidden: Boolean(row.admin_hidden) } : {}),
-    ...(detail ? { cards: JSON.parse(row.cards_json) } : {}) };
+    ...(detail ? { cards: JSON.parse(row.cards_json), ...(row.anki_media_json && row.anki_media_json !== '{}' ? { ankiMedia: JSON.parse(row.anki_media_json) } : {}) } : {}) };
 }
 
 async function handle(request, env) {
@@ -65,6 +66,16 @@ async function handle(request, env) {
       return json({ success: true });
     }
     throw new CommunityError(404, 'Endpoint not found.');
+  }
+
+  if (path === '/v1/community/account/developer' && method === 'PUT') {
+    const user = await communityUser(request, env);
+    if (!user.is_developer) throw new CommunityError(403, 'Developer access is required.');
+    const body = await readCommunityJSON(request);
+    if (!body || typeof body.allowAnkiUploads !== 'boolean' || Object.keys(body).some(key => key !== 'allowAnkiUploads')) throw new CommunityError(400, 'Choose a valid developer option.');
+    await db.prepare('UPDATE community_users SET developer_anki_uploads=? WHERE id=? AND is_developer=1').bind(body.allowAnkiUploads ? 1 : 0,user.id).run();
+    const row = await db.prepare('SELECT * FROM community_users WHERE id=?').bind(user.id).first();
+    return json(await ownerProfile(db,row));
   }
 
   if (path === '/v1/community/account' && (method === 'GET' || method === 'PUT')) {
@@ -305,7 +316,7 @@ async function handle(request, env) {
 
   if (path === '/v1/community/decks/drafts' && method === 'POST') {
     const user = await communityUser(request, env);
-    const meta = deckMetadata(await readCommunityJSON(request));
+    const meta = deckMetadata(await readCommunityJSON(request), Boolean(user.is_developer && user.developer_anki_uploads));
     const id = crypto.randomUUID();
     const result = await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,created_at,updated_at,review_status)
       SELECT ?,?,?,?,?,?,?,?,?,NULL WHERE
@@ -322,10 +333,12 @@ async function handle(request, env) {
     const user = await communityUser(request, env);
     const deck = await ownedDeck(env, uploadMatch[1], user);
     const contentType = (request.headers.get('Content-Type') || '').split(';')[0].toLowerCase();
-    const type = MEDIA_TYPES[contentType];
+    const ankiUpload = contentType === 'application/octet-stream';
+    if (ankiUpload && !(user.is_developer && user.developer_anki_uploads)) throw new CommunityError(403, 'Uploading decks imported from Anki are not supported yet');
+    const type = ankiUpload ? { extension: 'bin', maximum: 20 * 1024 * 1024 } : MEDIA_TYPES[contentType];
     if (!type) throw new CommunityError(415, 'Use JPEG/PNG images or MP3/M4A/WAV audio.');
     const bytes = await readLimitedBody(request, type.maximum);
-    validateMedia(bytes, contentType);
+    if (!ankiUpload) validateMedia(bytes, contentType);
     const id = crypto.randomUUID();
     const key = `decks/${deck.id}/${id}.${type.extension}`;
     // Reserve capacity in the same SQL statement that checks it, including concurrent uploads.
@@ -414,15 +427,25 @@ async function handle(request, env) {
       const dismissed = await db.prepare('DELETE FROM community_deck_notices WHERE deck_id=? AND owner_id=?').bind(id,user.id).run();
       if (dismissed.meta.changes) return json({ success: true });
     }
-    await ownedDeck(env, id, user);
+    const ownedPublication = await ownedDeck(env, id, user);
     if (method === 'PUT' || method === 'PATCH') {
-      const { metadata: meta, cards, media } = validateCommunityDeck(await readCommunityJSON(request));
+      const developer = Boolean(user.is_developer && user.developer_anki_uploads);
+      const body = await readCommunityJSON(request, false, user.is_developer ? 16 * 1024 * 1024 : 1024 * 1024);
+      // Creator name overrides need the developer role, independent of the Anki switch.
+      const publisherHandle = body.publisherHandle;
+      if (publisherHandle && !user.is_developer) throw new CommunityError(403, 'Custom publishing names require developer access.');
+      delete body.publisherHandle;
+      const { metadata: meta, cards, media, ankiMedia } = validateCommunityDeck(body, developer);
+      if (publisherHandle !== undefined && (typeof publisherHandle !== 'string' || publisherHandle.length > 80 || /[\x00-\x1f]/.test(publisherHandle))) throw new CommunityError(400, 'Choose a creator name of up to 80 characters.');
+      if (cards.some(card => card.cardType === 'anki') && new TextEncoder().encode(JSON.stringify(cards) + JSON.stringify(ankiMedia)).length > 1024 * 1024) {
+        throw new CommunityError(413, 'These Anki templates are too large to share. Split the deck into smaller decks.');
+      }
       await rejectCommunityRepublication(db, cards, user.id);
       const { results: uploads } = await db.prepare('SELECT id,content_type,byte_size FROM community_media WHERE deck_id=? AND uploaded=1 AND deleting=0').bind(id).all();
       let publishedBytes = 0;
       for (const [reference, kind] of media) {
         const upload = uploads.find(item => item.id === reference);
-        if (!upload || !upload.content_type.startsWith(`${kind}/`)) throw new CommunityError(400, 'Every attachment must be uploaded to this deck before publishing.');
+        if (!upload || !(kind === 'anki' ? upload.content_type === 'application/octet-stream' : upload.content_type.startsWith(`${kind}/`))) throw new CommunityError(400, 'Every attachment must be uploaded to this deck before publishing.');
         publishedBytes += upload.byte_size;
       }
       if (publishedBytes > maxDeckBytes || media.size > 1000) throw new CommunityError(413, 'A shared deck can contain up to 100 MB of media and 1,000 attachments.');
@@ -434,8 +457,8 @@ async function handle(request, env) {
         const chunk = mediaIDs.slice(start, start + 90);
         statements.push(db.prepare(`UPDATE community_media SET attached=1 WHERE deck_id=? AND id IN (${chunk.map(() => '?').join(',')}) AND ${guard}`).bind(id, ...chunk,id,user.id));
       }
-      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,status='draft',review_status='pending',review_message=NULL,submitted_at=?,reviewed_at=NULL,reviewed_by=NULL,updated_at=? WHERE id=? AND owner_id=? AND status!='deleted'`)
-        .bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, now(), now(), id, user.id));
+      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,publisher_handle=?,anki_media_json=?,status='draft',review_status='pending',review_message=NULL,submitted_at=?,reviewed_at=NULL,reviewed_by=NULL,updated_at=? WHERE id=? AND owner_id=? AND status!='deleted'`)
+        .bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, publisherHandle?.trim() || ownedPublication.publisher_handle || null, JSON.stringify(ankiMedia), now(), now(), id, user.id));
       const results = await db.batch(statements);
       if (!results.at(-1).meta.changes) throw new CommunityError(409, 'This deck was removed while publishing.');
       const submitted = await db.prepare('SELECT submitted_at FROM community_decks WHERE id=? AND owner_id=?').bind(id,user.id).first();

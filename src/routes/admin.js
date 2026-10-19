@@ -96,7 +96,7 @@ export async function admin(request, env) {
       const deck = await db.prepare("SELECT * FROM community_decks WHERE id=? AND status='draft' AND admin_created=1 AND (review_status IS NULL OR (review_status='approved' AND submitted_at IS NULL))").bind(publishMatch[1]).first();
       if (!deck) throw new CommunityError(409, 'Deck is no longer a draft. Reload it.');
       if (deck.revision !== body.expectedRevision) throw new CommunityError(409, 'Deck changed. Reload it before publishing.');
-      validateCommunityDeck({ name: deck.name, description: deck.description, categoryTag: deck.category_tag, colorHex: deck.color_hex, deckType: deck.deck_type, cards: JSON.parse(deck.cards_json) });
+      validateCommunityDeck({ name: deck.name, description: deck.description, categoryTag: deck.category_tag, colorHex: deck.color_hex, deckType: deck.deck_type, cards: JSON.parse(deck.cards_json), ankiMedia: JSON.parse(deck.anki_media_json || '{}') }, true);
       const result = await db.batch([
         db.prepare("INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,'publish_deck',?,?,? WHERE EXISTS(SELECT 1 FROM community_decks WHERE id=? AND revision=? AND status='draft')")
           .bind(crypto.randomUUID(), actor, deck.id, JSON.stringify({ name: deck.name }), now(), deck.id, body.expectedRevision),
@@ -158,12 +158,12 @@ export async function admin(request, env) {
       const deck = await db.prepare("SELECT * FROM community_decks WHERE id=? AND status='draft' AND review_status='pending'").bind(reviewMatch[1]).first();
       if (!deck || deck.revision !== body.expectedRevision) throw new CommunityError(409, 'Submission changed or was already reviewed. Refresh it before deciding.');
       if (body.decision === 'approve') {
-        const { media } = validateCommunityDeck({ name: deck.name, description: deck.description, categoryTag: deck.category_tag, colorHex: deck.color_hex, deckType: deck.deck_type, cards: JSON.parse(deck.cards_json) });
+        const { media } = validateCommunityDeck({ name: deck.name, description: deck.description, categoryTag: deck.category_tag, colorHex: deck.color_hex, deckType: deck.deck_type, cards: JSON.parse(deck.cards_json), ankiMedia: JSON.parse(deck.anki_media_json || '{}') }, true);
         const uploads = (await db.prepare('SELECT id,content_type,byte_size FROM community_media WHERE deck_id=? AND uploaded=1 AND attached=1 AND deleting=0').bind(deck.id).all()).results;
         let bytes = 0;
         for (const [reference,kind] of media) {
           const upload = uploads.find(row => row.id === reference);
-          if (!upload || !upload.content_type.startsWith(`${kind}/`)) throw new CommunityError(409, 'Submission has an unavailable attachment. Ask the author to resubmit.');
+          if (!upload || !(kind === 'anki' ? upload.content_type === 'application/octet-stream' : upload.content_type.startsWith(`${kind}/`))) throw new CommunityError(409, 'Submission has an unavailable attachment. Ask the author to resubmit.');
           bytes += upload.byte_size;
         }
         if (bytes > 100*1024*1024 || media.size > 1000) throw new CommunityError(413, 'Submission exceeds media limits.');
@@ -187,12 +187,12 @@ export async function admin(request, env) {
       const current = await db.prepare("SELECT * FROM community_decks WHERE id=? AND status!='deleted'").bind(detail[1]).first();
       if (!current) throw new CommunityError(404, 'Deck not found or already deleted.');
       if (current.revision !== body.expectedRevision) throw new CommunityError(409, 'This deck changed since you opened it. Reload it before saving.');
-      const { metadata: meta, cards, media } = validateCommunityDeck(body);
+      const { metadata: meta, cards, media, ankiMedia } = validateCommunityDeck({ ...body, ankiMedia: body.ankiMedia ?? JSON.parse(current.anki_media_json || '{}') }, true);
       const uploads = (await db.prepare('SELECT id,content_type,byte_size FROM community_media WHERE deck_id=? AND uploaded=1 AND deleting=0').bind(detail[1]).all()).results;
       let bytes = 0;
       for (const [id, kind] of media) {
         const upload = uploads.find(row => row.id === id);
-        if (!upload || !upload.content_type.startsWith(`${kind}/`)) throw new CommunityError(400, 'Attachments must belong to this deck and match the image/audio field.');
+        if (!upload || !(kind === 'anki' ? upload.content_type === 'application/octet-stream' : upload.content_type.startsWith(`${kind}/`))) throw new CommunityError(400, 'Attachments must belong to this deck and match the image/audio field.');
         bytes += upload.byte_size;
       }
       if (bytes > 100 * 1024 * 1024 || media.size > 1000) throw new CommunityError(413, 'A deck supports up to 100 MB of media and 1,000 attachments.');
@@ -207,8 +207,8 @@ export async function admin(request, env) {
         const chunk = ids.slice(start, start + 85);
         statements.push(db.prepare(`UPDATE community_media SET attached=1 WHERE deck_id=? AND id IN (${chunk.map(() => '?').join(',')}) AND ${guard}`).bind(detail[1], ...chunk, detail[1], body.expectedRevision));
       }
-      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,card_count=?,download_count=?,updated_at=?,admin_note=?,admin_action='edited',admin_updated_at=?
-        WHERE id=? AND revision=? AND status!='deleted'`).bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), cards.length, body.downloadCount, now(), note, now(), detail[1], body.expectedRevision));
+      statements.push(db.prepare(`UPDATE community_decks SET name=?,description=?,category_tag=?,color_hex=?,deck_type=?,cards_json=?,anki_media_json=?,card_count=?,download_count=?,updated_at=?,admin_note=?,admin_action='edited',admin_updated_at=?
+        WHERE id=? AND revision=? AND status!='deleted'`).bind(meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, JSON.stringify(cards), JSON.stringify(ankiMedia), cards.length, body.downloadCount, now(), note, now(), detail[1], body.expectedRevision));
       const result = await db.batch(statements);
       if (!result.at(-1).meta.changes) throw new CommunityError(409, 'This deck changed while saving. Reload it before saving.');
       return reply({ success: true });
