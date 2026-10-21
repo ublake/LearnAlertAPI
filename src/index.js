@@ -26,6 +26,7 @@ import { limitAIRequest, pruneAILimits } from "./lib/aiLimits.js";
 import { community, cleanupCommunity } from "./routes/community.js";
 import { appleConfigured } from './lib/appleLifecycle.js';
 import { admin } from "./routes/admin.js";
+import { adminCatalog, publicCatalog } from "./routes/catalog.js";
 
 function classify(error) {
   if (error instanceof ValidationError) {
@@ -96,11 +97,14 @@ export default {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
 
+    if (url.pathname === '/v1/admin/catalog' || url.pathname.startsWith('/v1/admin/catalog/')) return adminCatalog(request, env);
     if (url.pathname.startsWith('/v1/admin/')) return admin(request, env);
 
     if (request.method === "OPTIONS") {
       return optionsResponse();
     }
+
+    if (url.pathname === '/v1/catalog' || url.pathname.startsWith('/v1/catalog/')) return publicCatalog(request, env);
 
     // Community routes use individual Apple-verified sessions for writes.
     // Browsing published decks is public and does not require the AI API key.
