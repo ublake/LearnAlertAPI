@@ -42,6 +42,28 @@ test('catalog publishing validates full curriculum, guides, activities and ident
   const many=exam();many.cards=Array.from({length:1200},(_,i)=>({...many.cards[0],id:'q'+i}));assert.equal(validateCatalogContent('exam',many,many.id,{publish:true}).summary.cardCount,1200);
 });
 
+test('catalog media-only answerability matches native key precedence and ignores unsupported top-level ID aliases',()=>{
+  const references=['catalog:00000000-0000-0000-0000-000000000001','catalog:00000000-0000-0000-0000-000000000002'];
+  for (const kind of ['course','exam']) {
+    const document=kind==='course'?course():exam();
+    const card=kind==='course'?document.units[0].lessons[0].cards[0]:document.cards[0];
+    delete card.activity;
+    Object.assign(card,{question:'',promptImageName:references[0],correctAnswer:'',options:['',''],correctOptionIndex:1,fieldMedia:{'option:0':{imageID:references[0]},'option:1':{audioID:references[1]}}});
+    const validate=()=>validateCatalogContent(kind,document,document.id,{publish:true});
+    assert.doesNotThrow(validate); // Absent native keys still decode their aliases.
+    card.fieldMedia['option:0'].image='';assert.throws(validate,error=>error.status===400&&error.message.includes('options[0]'));
+    card.fieldMedia['option:0'].image=null;assert.doesNotThrow(validate);
+    card.fieldMedia['option:1'].audio='';assert.throws(validate,error=>error.status===400&&error.message.includes('options[1]'));
+    delete card.fieldMedia['option:1'].audio;assert.doesNotThrow(validate);
+    delete card.fieldMedia['option:0'];card.optionImageIDs=[references[0],''];assert.throws(validate,error=>error.status===400&&error.message.includes('options[0]'));
+    card.optionImageNames=[references[0],''];assert.doesNotThrow(validate);
+    card.fieldMedia.prompt={imageID:references[0]};card.promptImageName='';assert.throws(validate,error=>error.status===400&&error.message.includes('question'));
+    delete card.promptImageName;assert.doesNotThrow(validate);
+    delete card.fieldMedia.prompt;card.promptImageID=references[0];card.promptAudioID=references[1];assert.throws(validate,error=>error.status===400&&error.message.includes('question'));
+    card.promptAudioName=references[1];assert.doesNotThrow(validate);
+  }
+});
+
 test('catalog authenticates writes, publishes immutable snapshots, preserves live drafts, audits, archives and restores',async()=>{
   const {mf,db,admin,publicCall,bucket,communityAdmin}=await harness();
   try {

@@ -24,9 +24,20 @@ function identifiers(values, path, globallySeen) {
 }
 function color(value, path) { if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) fail(path, 'use a six-digit hex color.'); }
 function optionalStrings(value, fields, path) { for (const key of fields) if (value[key] !== undefined && value[key] !== null) string(value[key], `${path}.${key}`); }
-function fieldHasMedia(card, field, legacy = []) {
+function fieldHasMedia(card, field) {
   const media = card.fieldMedia?.[field];
-  return ['image','audio','imageID','audioID'].some(key => typeof media?.[key] === 'string' && media[key].trim()) || legacy.some(value => typeof value === 'string' && value.trim());
+  // Match CardFieldMedia's native-key precedence, including explicit empties,
+  // then the same top-level Name overrides used by resolvedFieldMedia in-app.
+  let image = media?.image ?? media?.imageID, audio = media?.audio ?? media?.audioID;
+  if (field === 'prompt') {
+    if (card.promptImageName != null) image = card.promptImageName;
+    if (card.promptAudioName != null) audio = card.promptAudioName;
+  } else if (field === 'answer' && card.answerImageName != null) image = card.answerImageName;
+  else if (/^option:\d+$/.test(field)) {
+    const optionImage = card.optionImageNames?.[Number(field.slice(7))];
+    if (typeof optionImage === 'string' && optionImage.length) image = optionImage;
+  }
+  return [image,audio].some(value => typeof value === 'string' && value.trim());
 }
 function normalizedAnswer(value) { return value.normalize('NFC').toLowerCase().replace(/[\p{White_Space}\p{P}]/gu, ''); }
 function validateAnswerability(card, path, course) {
@@ -43,13 +54,13 @@ function validateAnswerability(card, path, course) {
   if (quiz) {
     const options = card.options ?? [];
     if (options.length < 2) fail(`${path}.options`, 'quiz cards need at least two answer choices.');
-    if (!card.question.trim() && !fieldHasMedia(card,'prompt',[card.promptImageName,card.promptAudioName,card.promptImageID,card.promptAudioID]) && !(card.cardType === 'listening' || activity === 'listenChoose') ) fail(`${path}.question`,'add text, an image or audio for the question.');
+    if (!card.question.trim() && !fieldHasMedia(card,'prompt') && !(card.cardType === 'listening' || activity === 'listenChoose') ) fail(`${path}.question`,'add text, an image or audio for the question.');
     options.forEach((value,index) => {
-      if (!value.trim() && !fieldHasMedia(card,`option:${index}`,[card.optionImageNames?.[index],card.optionImageIDs?.[index]])) fail(`${path}.options[${index}]`,'add text, an image or audio for this answer choice.');
+      if (!value.trim() && !fieldHasMedia(card,`option:${index}`)) fail(`${path}.options[${index}]`,'add text, an image or audio for this answer choice.');
     });
     const answers = [card.correctAnswer,...(card.acceptedAnswers ?? [])];
     const matches = value => course ? answers.some(answer => normalizedAnswer(answer) && normalizedAnswer(answer) === normalizedAnswer(value)) : card.correctAnswer === value;
-    const mediaChoices = options.some((_,index) => fieldHasMedia(card,`option:${index}`,[card.optionImageNames?.[index],card.optionImageIDs?.[index]]));
+    const mediaChoices = options.some((_,index) => fieldHasMedia(card,`option:${index}`));
     const answerMatches = course && !mediaChoices ? options.some(matches) : options.includes(card.correctAnswer);
     if (card.correctOptionIndex == null && !answerMatches || course && !mediaChoices && !answerMatches) fail(`${path}.correctAnswer`,'the correct answer must match an available choice, or set correctOptionIndex for a media choice.');
     if (card.correctOptionIndex != null && options.includes(card.correctAnswer) && options[card.correctOptionIndex] !== card.correctAnswer) fail(`${path}.correctOptionIndex`,'the selected correct option contradicts correctAnswer.');
