@@ -95,3 +95,12 @@ The initial native export contains Spanish Foundations (57 cards), Korean
 all eleven section guides. Forty portable images preserve the original bundled
 course artwork. No community submissions or personal learning records are part
 of this migration.
+
+## Prerecorded course speech
+
+The admin API can generate or reuse private MP3 media with the existing OpenAI
+binding and signed-in administrator. See [SPEECH.md](SPEECH.md) for the protected
+routes, immutable run allowances, exact voice profile, cache/reconciliation and
+QA contract. It does not edit or publish courses, and cannot make a paid request
+without an explicit bounded allowance. USD reservations are estimates, not a
+verified provider billing hard cap.

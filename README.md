@@ -384,3 +384,10 @@ these quotas bound request volume while device attestation remains future work.
 For isolated local development only, `ALLOW_UNAUTHENTICATED_AI=true` and
 `AI_LIMITS_DISABLED=true` explicitly bypass their respective checks. Do not set
 these flags on a production Worker.
+
+## Admin course speech
+
+Protected prerecorded MP3 generation uses the existing OpenAI key and admin
+Access identity, not the public app key. See [SPEECH.md](SPEECH.md). Generation
+requires a bounded run allowance, retains durable duplicate/cost reservations,
+reuses existing AI quotas, and returns private catalog-owned media for review.

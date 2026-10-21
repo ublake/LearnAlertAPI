@@ -1,3 +1,4 @@
+import { catalogSpeech } from '../lib/catalogSpeech.js';
 import { adminIdentity } from '../lib/adminAuth.js';
 import { CommunityError, MEDIA_TYPES, readLimitedBody, validateMedia } from '../lib/communityValidation.js';
 import { catalogIDPattern, expectedCatalogRevision, readCatalogJSON, validateCatalogContent } from '../lib/catalogValidation.js';
@@ -146,6 +147,20 @@ export async function adminCatalog(request, env) {
     const path = url.pathname.slice('/v1/admin/catalog'.length).replace(/^\//, '');
     const upload = path.match(/^([^/]+)\/media$/);
     if (!['GET','HEAD'].includes(method) && (request.headers.get('Origin') !== 'https://learnalertapp.com' || (!upload && request.headers.get('Content-Type')?.split(';')[0] !== 'application/json'))) throw new CommunityError(403, 'Invalid admin request origin.');
+    const speech = path.match(/^([^/]+)\/speech(?:\/(budgets|[a-f0-9]{64}))?$/);
+    if ((path === 'speech/status' && method === 'GET') || (speech && catalogIDPattern.test(speech[1]) &&
+        ((!speech[2] && method === 'POST') || (speech[2] === 'budgets' && ['GET','POST'].includes(method)) || (speech[2] && speech[2] !== 'budgets' && method === 'GET')))) {
+      try {
+        const result = await catalogSpeech(request,env,actor,speech?.[1],path === 'speech/status' ? 'status' : speech[2] === 'budgets' ? 'budgets' : speech[2] ? 'job' : 'generate',speech?.[2]);
+        const response = reply(result.body,result.status || 200);
+        if (result.retryAfter) response.headers.set('Retry-After',result.retryAfter);
+        return response;
+      } catch (error) {
+        if (error instanceof CommunityError) return reply({error:{code:error.code,message:error.message}},error.status);
+        // Avoid leaking prompts/credentials through raw upstream/storage errors.
+        return reply({error:{code:'TTS_UNAVAILABLE',message:'Speech is unavailable. Check saved request status before retrying.'}},503);
+      }
+    }
     if (!path && method === 'GET') {
       const kind = url.searchParams.get('kind');
       if (kind && !['course','exam'].includes(kind)) throw new CommunityError(400, 'Invalid catalog kind.');

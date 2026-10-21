@@ -78,7 +78,7 @@ test('viewer blocking covers lists, details, previews and media, while permanent
   assert.ok((await (await admin('audit')).json()).items.some(r=>r.action==='restrict_profile'));
  }finally{await mf.dispose();}
 });
-test('Apple code exchange encrypts tokens, binds reauthentication identity, revokes on deletion and retries temporary failure',async()=>{
+test('Apple code exchange encrypts tokens, binds reauthentication identity, revokes on deletion and retries temporary failure',async t=>{
  const h=await setup(true);const {mf,db,request}=h;
  try {
   const body={identityToken:await h.identity('apple-owner'),nonce,authorizationCode:'owner'};
@@ -90,7 +90,18 @@ test('Apple code exchange encrypts tokens, binds reauthentication identity, revo
   const legacy=await (await request('auth/apple','POST',{identityToken:await h.identity('apple-legacy'),nonce})).json();assert.equal(legacy.appleRevocationAvailable,false);
   const needs=await request('account','DELETE',undefined,legacy.token);assert.equal(needs.status,409);assert.equal((await needs.json()).error.code,'APPLE_REAUTH_REQUIRED');
   h.setFail(true);const deleted=await request('account','DELETE',{identityToken:await h.identity('apple-legacy'),nonce,authorizationCode:'legacy'},legacy.token);assert.equal(deleted.status,200);assert.equal((await deleted.json()).appleRevocation,'pending');assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_apple_revocations').first()).n,1);assert.equal((await request('account','GET',undefined,legacy.token)).status,401);
-  h.setFail(false);await cleanupCommunity({...h.env,COMMUNITY_DB:db,DECK_ASSETS:await mf.getR2Bucket('DECK_ASSETS')});assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_apple_revocations').first()).n,0);
+  h.setFail(false);
+  // cleanupCommunity runs directly in Node, outside Miniflare's outboundService.
+  // Keep this retry entirely local: never send generated fixture credentials to Apple.
+  const cleanupFetch=t.mock.method(globalThis,'fetch',async(url,options)=>{
+   assert.equal(url,'https://appleid.apple.com/auth/revoke');
+   assert.equal(new URLSearchParams(options.body).get('token'),'refresh-apple-legacy');
+   return new Response('',{status:200});
+  });
+  try {await cleanupCommunity({...h.env,COMMUNITY_DB:db,DECK_ASSETS:await mf.getR2Bucket('DECK_ASSETS')});}
+  finally {cleanupFetch.mock.restore();}
+  assert.equal(cleanupFetch.mock.callCount(),1);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_apple_revocations').first()).n,0);
   assert.equal((await request('auth/apple','POST',{identityToken:await h.identity('apple-bad'),nonce,authorizationCode:'bad'})).status,401);
  }finally{await mf.dispose();}
 });
