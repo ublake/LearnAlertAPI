@@ -185,3 +185,40 @@ test('speech readiness does not shadow a catalog item named speech',async()=>{
     const readiness=await h.admin('speech/status');assert.equal(readiness.status,200);assert.equal((await readiness.json()).requiresBudget,true);
   }finally{await h.mf.dispose();}
 });
+
+
+test('speech studio stays behind existing admin auth and carries nonce CSP through the proxy',async()=>{
+  const h=await harness();try{
+    const unauthenticated=await h.admin('speech/studio','GET',undefined,{'Cf-Access-Jwt-Assertion':''});
+    assert.ok([401,403].includes(unauthenticated.status));assert.ok(!(await unauthenticated.text()).includes('<html'));
+    const response=await h.admin('speech/studio');assert.equal(response.status,200);
+    assert.match(response.headers.get('Content-Type'),/^text\/html/);assert.equal(response.headers.get('Cache-Control'),'no-store');
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'),null);
+    const html=await response.text(),nonce=html.match(/<script nonce="([a-f0-9]+)">/)?.[1];assert.ok(nonce);
+    assert.ok(response.headers.get('Content-Security-Policy').includes("script-src 'nonce-"+nonce+"'"));
+    assert.ok(response.headers.get('Content-Security-Policy').includes("frame-ancestors 'none'"));
+    assert.match(html,/<meta http-equiv="Content-Security-Policy"/);
+    assert.match(html,/window\.top !== window\.self/);assert.match(html,/<main id="studio-controls" hidden>/);
+    assert.ok(!/<script[^>]+src=/.test(html));assert.ok(!html.includes('test-secret-never-return'));
+    assert.equal((await h.admin('speech/studio','POST',{}, {Origin:'https://evil.example'})).status,403);
+    assert.equal(h.calls.length,0);
+  }finally{await h.mf.dispose();}
+});
+
+test('cache-only recovery cannot generate and job status returns only the selected catalog media',async()=>{
+  const h=await harness();try{
+    const missing=await h.admin('spanish/speech','POST',{input:'Hola.',cacheOnly:true});
+    assert.equal(missing.status,404);assert.equal((await missing.json()).error.code,'TTS_CACHE_MISS');
+    for(const cacheOnly of ['true',1,null]) assert.equal((await h.admin('spanish/speech','POST',{input:'Hola.',cacheOnly})).status,400);
+    assert.equal(h.calls.length,0);
+    assert.equal((await h.db.prepare('SELECT COUNT(*) AS n FROM catalog_speech_jobs').first()).n,0);
+    await h.budget();const generated=await (await h.generate()).json();
+    const source=await (await h.admin('spanish/speech/'+generated.requestHash)).json();
+    assert.equal(source.budgetId,'pilot');assert.equal(source.media.id,generated.id);
+    const foreign=await (await h.admin('korean/speech/'+generated.requestHash)).json();assert.equal(foreign.media,null);
+    const reused=await (await h.admin('korean/speech','POST',{input:'Hola.',cacheOnly:true})).json();
+    assert.equal(reused.cached,true);assert.notEqual(reused.id,generated.id);
+    const owned=await (await h.admin('korean/speech/'+generated.requestHash)).json();assert.equal(owned.media.id,reused.id);
+    assert.equal(h.calls.length,1);
+  }finally{await h.mf.dispose();}
+});

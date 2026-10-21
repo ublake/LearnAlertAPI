@@ -80,7 +80,7 @@ async function budgetSummary(db, row) {
 }
 function metadata(job) {
   const body = JSON.parse(job.request_json);
-  return { requestHash: job.request_hash, attemptId: job.attempt_id, state: job.state,
+  return { requestHash: job.request_hash, budgetId: job.budget_id, attemptId: job.attempt_id, state: job.state,
     provider: 'OpenAI', requestedModel: body.model, resolvedModel: null, voice: body.voice,
     instructions: body.instructions, input: body.input, responseFormat: body.response_format, speed: body.speed,
     fileSha256: job.file_sha256, byteSize: job.byte_size, generatedAt: job.state === 'ready' ? job.updated_at : null,
@@ -89,13 +89,16 @@ function metadata(job) {
     disclosure: 'AI-generated OpenAI speech. Listening and pronunciation review required before publication.' };
 }
 async function jobFor(db, hash) { return db.prepare('SELECT * FROM catalog_speech_jobs WHERE request_hash=?').bind(hash).first(); }
+async function mediaIdentity(catalogId, requestHash) {
+  const digest = await sha256(`catalog-speech:${catalogId}:${requestHash}`);
+  const id = `${digest.slice(0,8)}-${digest.slice(8,12)}-5${digest.slice(13,16)}-a${digest.slice(17,20)}-${digest.slice(20,32)}`;
+  return { id, key: `catalog/media/${catalogId}/${id}.mp3` };
+}
 async function materialize(env, catalogId, job, actor, cached) {
   if (job.state !== 'ready') fail(409, job.state === 'submitted' ? 'TTS_IN_PROGRESS' : 'TTS_RECONCILIATION_REQUIRED', 'This exact speech request was already submitted. Inspect its status; do not resubmit or change the text just to retry.');
   // Stable per-course IDs make concurrent cache reuse idempotent while retaining
   // the existing one-course-per-media ownership contract and unique R2 keys.
-  const digest = await sha256(`catalog-speech:${catalogId}:${job.request_hash}`);
-  const id = `${digest.slice(0,8)}-${digest.slice(8,12)}-5${digest.slice(13,16)}-a${digest.slice(17,20)}-${digest.slice(20,32)}`;
-  const key = `catalog/media/${catalogId}/${id}.mp3`, db = env.COMMUNITY_DB;
+  const { id, key } = await mediaIdentity(catalogId, job.request_hash), db = env.COMMUNITY_DB;
   const existing = await db.prepare('SELECT * FROM managed_catalog_media WHERE id=?').bind(id).first();
   if (!existing) {
     const source = await env.DECK_ASSETS.get(job.object_key);
@@ -155,13 +158,18 @@ export async function catalogSpeech(request, env, actor, catalogId, action, hash
     if (!hashPattern.test(hash)) fail(404,'TTS_NOT_FOUND','Speech request not found.');
     const job = await jobFor(db,hash);
     if (!job) fail(404,'TTS_NOT_FOUND','Speech request not found.');
-    return { body: { ...metadata(job), costNotice } };
+    const { id } = await mediaIdentity(catalogId, job.request_hash);
+    const row = await db.prepare('SELECT id,content_type,byte_size FROM managed_catalog_media WHERE id=? AND catalog_id=?').bind(id,catalogId).first();
+    const media = row ? { id:row.id, reference:`catalog:${row.id}`, url:`https://api.learnalertapp.com/v1/admin/catalog/media/${row.id}`, contentType:row.content_type, byteSize:row.byte_size } : null;
+    return { body: { ...metadata(job), media, costNotice } };
   }
   const body = await readCommunityJSON(request,false,8192);
-  fields(body,['input','budgetId']);
+  fields(body,['input','budgetId','cacheOnly']);
+  if (body.cacheOnly !== undefined && typeof body.cacheOnly !== 'boolean') fail(400,'TTS_INVALID_REQUEST','cacheOnly must be a boolean.');
   const speech = speechBody(body.input,env), requestHash = await speechHash(speech);
   const previous = await jobFor(db,requestHash);
   if (previous) return materialize(env,catalogId,previous,actor,true);
+  if (body.cacheOnly === true) fail(404,'TTS_CACHE_MISS','No completed recording is cached for this exact profile and text. Recovery never generates audio.');
   if (env.TTS_DISABLED === 'true') fail(503,'TTS_DISABLED','New speech generation is disabled. Saved audio remains available.');
   if (!env.OPENAI_API_KEY) fail(503,'TTS_NOT_CONFIGURED','The existing OpenAI API key binding is unavailable.');
   if (typeof body.budgetId !== 'string' || !budgetPattern.test(body.budgetId)) fail(400,'TTS_BUDGET_REQUIRED','Create an approved bounded speech budget and provide its budgetId.');

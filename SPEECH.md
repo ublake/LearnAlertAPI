@@ -13,6 +13,7 @@ Access assertion to the API; do not copy tokens into scripts or the client bundl
 
 | Method | API path | Same-origin studio path | Purpose |
 | --- | --- | --- | --- |
+| GET | `/v1/admin/catalog/speech/studio` | `/admin/api/catalog/speech/studio` | Protected visible browser controls |
 | GET | `/v1/admin/catalog/speech/status` | `/admin/api/catalog/speech/status` | Non-secret readiness and fixed profile |
 | GET/POST | `/v1/admin/catalog/:id/speech/budgets` | `/admin/api/catalog/:id/speech/budgets` | List/create immutable run allowances |
 | POST | `/v1/admin/catalog/:id/speech` | `/admin/api/catalog/:id/speech` | Generate or reuse one clip |
@@ -23,9 +24,35 @@ JSON and `Origin: https://learnalertapp.com`, in addition to the existing valid
 Access JWT. The app's shared API key is not an administrator credential. There
 is no public unauthenticated speech route and no admin CORS permission.
 
-The current studio proxy supports these routes without a website change. This
-release adds the API contract, not a new studio button. If the browser is blocked
-by Access, complete its normal owner sign-in; the endpoint does not bypass it.
+Open [the speech studio](https://learnalertapp.com/admin/api/catalog/speech/studio)
+after the normal administrator sign-in. Its visible controls use the existing
+same-origin proxy; no website deployment or token copying is needed. If Access
+blocks the page, complete its normal owner sign-in; it does not bypass it.
+
+1. Inspect the exact current voice/profile and select an existing catalog item.
+2. Select its already-approved run, or explicitly create one with the owner's
+   reviewed allowance, request count and conservative per-request reservation.
+   Amounts start blank. A one-time approval is not a permanent default allowance.
+3. Enter the exact text and click **Generate MP3 using selected run** once.
+4. Listen through the normal audio controls or **Download MP3**. New media stays
+   private; cached media retains its publication status. No course is edited or
+   published.
+
+The static page loads no third-party assets. Existing Access protects the HTML
+and JSON routes, and existing Origin/JSON checks still protect writes. A nonce
+CSP is included both in headers and in HTML because the website proxy forwards
+only a subset of headers. Controls are hidden without JavaScript and disabled
+in frames. All returned text is rendered as text, not HTML.
+
+Pending request text, catalog/run IDs and canonical hash are retained only in
+this browser tab's session storage for recovery, never credentials. Reloading
+does not resume generation. On a timeout, use **Check saved request status**,
+not Generate again. A ready job returns its already-attached, same-catalog media.
+If attachment was interrupted, **Recover completed saved media** requires a
+ready status and exact current profile/hash, then makes a server-enforced
+cache-only request. It cannot initiate paid generation. Uncertain/submitted
+jobs cannot be cleared from the recovery view; clearing a completed view never
+resets server records or reservations.
 
 ## Bounded runs, not an unverified billing guarantee
 
@@ -80,6 +107,10 @@ them. The studio proxy may share an IP quota, so these are not per-admin limits.
 Input is preserved exactly, including accents, whitespace, case and punctuation.
 Use at most 1,000 characters and 1,800 UTF-8 bytes per short clip. Unknown request
 fields, arbitrary provider URLs and per-request profile overrides are rejected.
+
+Optional `cacheOnly: true` on the generation route permits only an exact existing
+recording; a missing cache returns 404 before budget/quota/provider work.
+Non-boolean values are rejected. This is for recovery/reuse, not a retry flag.
 
 Fixed defaults:
 
@@ -156,3 +187,10 @@ missing setup, strict input/profile, budget idempotency and caps, shared quotas,
 concurrent duplicate/distinct requests, private ownership, cross-catalog cache
 reuse, unchanged publication, rejected/uncertain outcomes and corrupt/missing
 cache. No test uses real OpenAI credentials or generates paid audio.
+
+`npm run test:studio` runs visible-control browser regressions with every network
+request mocked, using local Chromium (`CHROMIUM_PATH` may override the executable).
+It covers explicit allowances, exact text/hash, private downloads, uncertain reload
+recovery, expired sign-in and profile changes. No real account or paid provider
+is contacted. Set `STUDIO_SCREENSHOTS` to a local folder for mock desktop/mobile
+screenshots. Install Chromium separately when not already present.

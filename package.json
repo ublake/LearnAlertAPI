@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test"
+    "test": "node --test",
+    "test:studio": "node scripts/speech-studio-browser.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0",
+    "esbuild": "0.28.1",
     "miniflare": "5.20260918.0-alpha",
-    "esbuild": "0.28.1"
+    "playwright-core": "^1.64.1",
+    "wrangler": "^4.0.0"
   }
 }
