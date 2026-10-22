@@ -82,7 +82,7 @@ function audit(db, actor, id, action, details, expectedRevision) {
     SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM managed_catalog WHERE id=? AND revision=?)`)
     .bind(crypto.randomUUID(), actor, `catalog_${action}`, id, JSON.stringify(details), seconds(), id, expectedRevision);
 }
-async function itemFor(env, row) { return { ...summary(row), document: await documentFor(env, row.draft_key), deliveries: (await env.COMMUNITY_DB.prepare("SELECT profile,revision,source_revision AS sourceRevision,state,digest,title,activated_at AS activatedAt FROM managed_catalog_deliveries WHERE catalog_id=? ORDER BY revision DESC").bind(row.id).all()).results }; }
+async function itemFor(env, row) { const document=await documentFor(env,row.draft_key); const collection=document.presentation === 'deck_collection' ? await env.COMMUNITY_DB.prepare('SELECT revision,published_at FROM managed_catalog_collections WHERE catalog_id=?').bind(row.id).first() : null; return { ...summary(row), ...(collection ? {publishedRevision:collection.revision,publishedAt:collection.published_at} : {}), document, deliveries: (await env.COMMUNITY_DB.prepare("SELECT profile,revision,source_revision AS sourceRevision,state,digest,title,activated_at AS activatedAt FROM managed_catalog_deliveries WHERE catalog_id=? ORDER BY revision DESC").bind(row.id).all()).results }; }
 async function current(db, id) {
   const row = await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(id).first();
   if (!row) throw new CommunityError(404, 'Catalog item not found.');
@@ -132,7 +132,7 @@ async function saveDraft(env, row, body, actor, document, action = 'save') {
 async function mediaResponse(request, env, id, isPublic) {
   if (!uuidPattern.test(id)) throw new CommunityError(404, 'Media not found.');
   const query = isPublic
-    ? `SELECT m.* FROM managed_catalog_media m JOIN managed_catalog_public_media p ON p.media_id=m.id JOIN managed_catalog c ON c.id=p.catalog_id WHERE m.id=? AND c.status='published' AND c.published_key IS NOT NULL`
+    ? `SELECT m.* FROM managed_catalog_media m JOIN managed_catalog_public_media p ON p.media_id=m.id JOIN managed_catalog c ON c.id=p.catalog_id WHERE m.id=? AND c.status='published' AND (c.published_key IS NOT NULL OR EXISTS(SELECT 1 FROM managed_catalog_collections s WHERE s.catalog_id=c.id))`
     : 'SELECT * FROM managed_catalog_media WHERE id=?';
   const row = await env.COMMUNITY_DB.prepare(query).bind(id).first();
   if (!row) throw new CommunityError(404, 'Media not found.');
@@ -257,11 +257,23 @@ export async function adminCatalog(request, env) {
     }
     if ((action==='publish'||action==='archive')&&method==='POST'||!action&&method==='DELETE') {
       const body=await readCatalogJSON(request); requireRevision(row,body); note(body);
-      if (action === 'publish' && ((row.id === 'spanish-course' && row.published_key) || await db.prepare("SELECT 1 FROM managed_catalog_deliveries WHERE catalog_id=? AND profile IN ('practice-v1','practice-v2') LIMIT 1").bind(row.id).first())) throw new CommunityError(409,'This course uses explicit delivery releases. Publishing its saved draft through the legacy path is disabled.');
+
       const publishing=action==='publish', next=row.revision+1, stamp=seconds(), effective=publishing?'publish':'archive';
       const document=await documentFor(env,row.draft_key);
+      if (publishing && document.presentation !== 'deck_collection' && ((row.id === 'spanish-course' && row.published_key) || await db.prepare("SELECT 1 FROM managed_catalog_deliveries WHERE catalog_id=? AND profile IN ('practice-v1','practice-v2') LIMIT 1").bind(row.id).first())) throw new CommunityError(409,'Use a simple language collection or the existing compatible delivery workflow.');
       const validated=validateCatalogContent(row.kind,document,row.id,{publish:publishing});
       const references=publishing?await checkMedia(db,row.id,document):[];
+      if (publishing && row.kind === 'course' && document.presentation === 'deck_collection') {
+        const condition='EXISTS(SELECT 1 FROM managed_catalog WHERE id=? AND revision=?)';
+        const statements=[revisionInsert(db,row,next,'publish_collection',row.draft_key,actor,body,true),audit(db,actor,row.id,'publish_collection',{revision:next,previousRevision:row.revision,title:validated.title},row.revision),advanceState(db,row,true)];
+        for (const id of references) statements.push(db.prepare(`INSERT OR IGNORE INTO managed_catalog_public_media(catalog_id,media_id) SELECT ?,? WHERE ${condition}`).bind(row.id,id,row.id,row.revision));
+        statements.push(db.prepare(`INSERT INTO managed_catalog_collections(catalog_id,revision,content_key,title,published_at) SELECT ?,?,?,?,? WHERE ${condition} ON CONFLICT(catalog_id) DO UPDATE SET revision=excluded.revision,content_key=excluded.content_key,title=excluded.title,published_at=excluded.published_at`).bind(row.id,next,row.draft_key,validated.title,stamp,row.id,row.revision));
+        statements.push(db.prepare("UPDATE managed_catalog SET status='published',revision=?,published_title=?,updated_at=?,updated_by=?,archived_at=NULL WHERE id=? AND revision=?").bind(next,validated.title,stamp,actor,row.id,row.revision));
+        const results=await db.batch(statements);
+        if(!results.at(-1).meta.changes)throw new CommunityError(409,'This collection changed. Reload before publishing.','CATALOG_CONFLICT');
+        return reply({item:await itemFor(env,await current(db,row.id))});
+      }
+
       const guard='EXISTS(SELECT 1 FROM managed_catalog WHERE id=? AND revision=?)';
       const statements=[revisionInsert(db,row,next,effective,row.draft_key,actor,body,publishing),audit(db,actor,row.id,effective,{revision:next,previousRevision:row.revision,title:validated.title,note:note(body)},row.revision),advanceState(db,row,publishing),db.prepare(`DELETE FROM managed_catalog_public_media WHERE catalog_id=? AND ${guard}`).bind(row.id,row.id,row.revision)];
       for (let start=0;start<references.length;start+=80) {
@@ -288,20 +300,23 @@ export async function publicCatalog(request,env) {
     if(!path) {
       const snapshot=await env.COMMUNITY_DB.batch([
         env.COMMUNITY_DB.prepare('SELECT revision,initialized FROM managed_catalog_state WHERE id=1'),
-        env.COMMUNITY_DB.prepare("SELECT id,kind,published_title,published_revision,published_at FROM managed_catalog WHERE status='published' AND published_key IS NOT NULL ORDER BY sort_order,id"),
-        env.COMMUNITY_DB.prepare("SELECT m.id,m.catalog_id,m.content_type FROM managed_catalog_media m JOIN managed_catalog_public_media p ON p.media_id=m.id JOIN managed_catalog c ON c.id=p.catalog_id WHERE c.status='published' AND c.published_key IS NOT NULL")
+        env.COMMUNITY_DB.prepare("SELECT c.id,c.kind,COALESCE(s.title,c.published_title) AS published_title,COALESCE(s.revision,c.published_revision) AS published_revision,COALESCE(s.published_at,c.published_at) AS published_at,COALESCE(s.content_key,c.published_key) AS published_key FROM managed_catalog c LEFT JOIN managed_catalog_collections s ON s.catalog_id=c.id WHERE c.status='published' AND (c.published_key IS NOT NULL OR s.content_key IS NOT NULL) ORDER BY c.sort_order,c.id"),
+        env.COMMUNITY_DB.prepare("SELECT m.id,m.catalog_id,m.content_type FROM managed_catalog_media m JOIN managed_catalog_public_media p ON p.media_id=m.id JOIN managed_catalog c ON c.id=p.catalog_id WHERE c.status='published' AND (c.published_key IS NOT NULL OR EXISTS(SELECT 1 FROM managed_catalog_collections s WHERE s.catalog_id=c.id))")
       ]);
       const state=snapshot[0].results[0],rows=snapshot[1].results,assets=snapshot[2].results;
       const legacy = (await env.COMMUNITY_DB.prepare("SELECT catalog_id,media_ids_json FROM managed_catalog_deliveries WHERE profile='legacy-v1' AND state='active'").all()).results;
-      return reply({schemaVersion:1,revision:String(state?.revision??0),initialized:Boolean(state?.initialized),items:rows.map(row=>({id:row.id,kind:row.kind,title:row.published_title,revision:row.published_revision,updatedAt:row.published_at,contentURL:`https://api.learnalertapp.com/v1/catalog/${encodeURIComponent(row.id)}?revision=${row.published_revision}`,assets:assets.filter(asset=>asset.catalog_id===row.id && (!legacy.some(x=>x.catalog_id===row.id) || JSON.parse(legacy.find(x=>x.catalog_id===row.id).media_ids_json).includes(asset.id))).map(asset=>({id:asset.id,reference:`catalog:${asset.id}`,contentType:asset.content_type,url:`https://api.learnalertapp.com/v1/catalog/media/${asset.id}`}))}))},200,true);
+      const simple = new Set();
+      for (const row of rows) if (legacy.some(x=>x.catalog_id===row.id) && (await documentFor(env,row.published_key)).presentation === 'deck_collection') simple.add(row.id);
+      return reply({schemaVersion:1,revision:String(state?.revision??0),initialized:Boolean(state?.initialized),items:rows.map(row=>({id:row.id,kind:row.kind,title:row.published_title,revision:row.published_revision,updatedAt:row.published_at,contentURL:`https://api.learnalertapp.com/v1/catalog/${encodeURIComponent(row.id)}?revision=${row.published_revision}`,assets:assets.filter(asset=>asset.catalog_id===row.id && (simple.has(row.id) || !legacy.some(x=>x.catalog_id===row.id) || JSON.parse(legacy.find(x=>x.catalog_id===row.id).media_ids_json).includes(asset.id))).map(asset=>({id:asset.id,reference:`catalog:${asset.id}`,contentType:asset.content_type,url:`https://api.learnalertapp.com/v1/catalog/media/${asset.id}`}))}))},200,true);
     }
     const media=path.match(/^media\/([^/]+)$/);
     if(media)return await mediaResponse(request,env,media[1],true);
     if(!catalogIDPattern.test(path))throw new CommunityError(404,'Catalog item not found.');
     const row=await current(env.COMMUNITY_DB,path);
-    if(row.status!=='published'||!row.published_key)throw new CommunityError(404,'Catalog item not found.');
+    const collection=await env.COMMUNITY_DB.prepare('SELECT * FROM managed_catalog_collections WHERE catalog_id=?').bind(row.id).first();
+    if(row.status!=='published'||!row.published_key&&!collection)throw new CommunityError(404,'Catalog item not found.');
     if(acceptsPractice(request)) return await practiceDocument(request, env, row,acceptedPracticeProfile(request));
-    let key=row.published_key,revision=row.published_revision;
+    let key=collection?.content_key ?? row.published_key,revision=collection?.revision ?? row.published_revision;
     if(url.searchParams.has('revision')) {
       const requested=Number(url.searchParams.get('revision'));
       if(!Number.isSafeInteger(requested)||requested<1)throw new CommunityError(400,'Invalid catalog revision.');

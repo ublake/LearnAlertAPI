@@ -143,18 +143,19 @@ export function validateCommunityDeck(body, developer = false) {
     (card.optionImageIDs ?? []).forEach((value, i) => legacy(`option:${i}`, 'imageID', value));
     const content = (key, value = '') => Boolean(value || fieldMedia[key]?.imageID || fieldMedia[key]?.audioID);
     let correctOptionIndex = null;
-    if (card.cardType === 'multiple_choice') {
+    if (card.cardType === 'multiple_choice' || card.cardType === 'fill_blank' && options.length) {
+      if (card.cardType === 'fill_blank' && !/_{2,}|\{blank\}|\[blank\]/.test(question)) throw new CommunityError(400, 'Choice blanks need a ___ in the sentence.');
       correctOptionIndex = card.correctOptionIndex ?? options.indexOf(correctAnswer);
       if (options.length < 2 || options.some((value, i) => !content(`option:${i}`, value)) || !Number.isInteger(correctOptionIndex) || correctOptionIndex < 0 || correctOptionIndex >= options.length) throw new CommunityError(400, 'Quiz cards need 2–4 text, image or audio choices and a correct choice index.');
       if (card.correctOptionIndex == null && (!correctAnswer || options.filter(value => value === correctAnswer).length !== 1)) throw new CommunityError(400, 'Use correctOptionIndex for media-only or duplicate answer text.');
     }
     if (card.cardType === 'matching' && (left.length < 2 || left.length !== right.length || left.some((value, i) => !content(`left:${i}`, value)) || right.some((value, i) => !content(`right:${i}`, value)))) throw new CommunityError(400, 'Matching cards need at least two complete text, image or audio pairs.');
     if (!imageOnly && card.cardType !== 'matching' && !content('prompt', question)) throw new CommunityError(400, 'Add text, an image or audio to the question.');
-    if (!imageOnly && !['matching','multiple_choice'].includes(card.cardType) && !content('answer', correctAnswer)) throw new CommunityError(400, 'Add text, an image or audio to the answer.');
+    if (!imageOnly && !['matching','multiple_choice'].includes(card.cardType) && !(card.cardType === 'fill_blank' && options.length) && !content('answer', correctAnswer)) throw new CommunityError(400, 'Add text, an image or audio to the answer.');
     if (imageOnly && (!fieldMedia.prompt?.imageID || question || correctAnswer || hint || options.length || left.length || right.length || Object.entries(fieldMedia).some(([key, value]) => !['prompt','answer'].includes(key) || value.audioID))) throw new CommunityError(400, 'Image cards need a front image, an optional back image, and no question, answer, hint, choices, matching pairs, or audio.');
     // Reject attachments for fields that the selected card type does not present.
     for (const [key, item] of Object.entries(fieldMedia)) {
-      if (key.startsWith('option:') && card.cardType !== 'multiple_choice' || /^(left|right):/.test(key) && card.cardType !== 'matching' || key === 'answer' && ['multiple_choice','matching'].includes(card.cardType)) {
+      if (key.startsWith('option:') && !['multiple_choice','fill_blank'].includes(card.cardType) || /^(left|right):/.test(key) && card.cardType !== 'matching' || key === 'answer' && ['multiple_choice','matching'].includes(card.cardType)) {
         if (item.imageID || item.audioID) throw new CommunityError(400, 'Attachment field does not belong to this card type.');
       }
       for (const [kind, id] of [['image', item.imageID], ['audio', item.audioID]]) {
@@ -164,7 +165,7 @@ export function validateCommunityDeck(body, developer = false) {
       }
       if (!item.imageID && !item.audioID) delete fieldMedia[key];
     }
-    return { id, question, correctAnswer: card.cardType === 'multiple_choice' ? options[correctOptionIndex] : correctAnswer,
+    return { id, question, correctAnswer: correctOptionIndex != null ? options[correctOptionIndex] : correctAnswer,
       options, hint, correctOptionIndex, cardType: card.cardType, matchingLeftItems: left, matchingRightItems: right,
       sectionName: text(card.sectionName ?? '', 120, 'Section'), fieldMedia,
       promptImageID: fieldMedia.prompt?.imageID ?? null, answerImageID: fieldMedia.answer?.imageID ?? null,

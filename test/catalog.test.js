@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { composeDelivery, requireStableDeliveryIDs } from '../src/lib/catalogDelivery.js';
+import { composeDelivery, requireStableDeliveryIDs, contractsFor } from '../src/lib/catalogDelivery.js';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -267,6 +267,7 @@ test('migration pins approved Spanish before preparation, failed preparation and
   const sql=await readFile(new URL('../community-migrations/0015_catalog_deliveries.sql',import.meta.url),'utf8'),triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[];
   const statements=sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean);
   await db.batch([...statements,...triggers].map(s=>db.prepare(s)));
+  for(const statement of (await readFile(new URL('../community-migrations/0017_simple_language_collections.sql',import.meta.url),'utf8')).split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM managed_catalog_deliveries').first()).n,0);
   const oldPublish=()=>db.batch([db.prepare("INSERT INTO managed_catalog_revisions(catalog_id,revision,action,content_key,actor,created_at,published) VALUES('spanish-course',11,'publish','paused-r10','old-writer',11,1)"),db.prepare("DELETE FROM managed_catalog_public_media WHERE catalog_id='spanish-course'"),db.prepare("UPDATE managed_catalog SET published_key=draft_key,published_revision=11,revision=11 WHERE id='spanish-course'")]);
   for(const state of ['initial','failed-prepare','archived']) {
@@ -404,6 +405,7 @@ test('profile-index migration retains populated v1 rows, media FKs and approved 
   const before=(await db.prepare('SELECT * FROM managed_catalog_deliveries ORDER BY profile,revision').all()).results,media=(await db.prepare('SELECT * FROM managed_catalog_delivery_media ORDER BY media_id').all()).results;
   const sql=await readFile(new URL('../community-migrations/0016_cafe_delivery_profile.sql',import.meta.url),'utf8'),triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[],statements=sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean);
   await db.batch([...statements,...triggers].map(s=>db.prepare(s)));
+  for(const statement of (await readFile(new URL('../community-migrations/0017_simple_language_collections.sql',import.meta.url),'utf8')).split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();
   assert.deepEqual((await db.prepare('SELECT * FROM managed_catalog_deliveries ORDER BY profile,revision').all()).results,before);
   assert.deepEqual((await db.prepare('SELECT * FROM managed_catalog_delivery_media ORDER BY media_id').all()).results,media);
   await assert.rejects(()=>db.prepare("UPDATE managed_catalog SET published_revision=3,published_key=draft_key WHERE id='spanish-course'").run());
@@ -437,4 +439,35 @@ test('cashier audio references enforce approval, ownership and audio type at pre
   await db.prepare("UPDATE managed_catalog_media SET content_type='audio/mpeg' WHERE id=?").bind(audio).run();
   assert.equal((await admin(base.id+'/delivery','POST',{operation:'activate',profile:'practice-v2',expectedRevision:3,deliveryRevision:3})).status,200);
  } finally {await mf.dispose();}
+});
+
+test('simple language collections publish through the regular catalog without custom course metadata',async()=>{
+ const h=await harness();
+ try {
+  const document=course();document.id='spanish-course';document.language='Spanish';
+  let response=await h.admin('','POST',{id:document.id,kind:'course',document});assert.equal(response.status,201);
+  let item=(await response.json()).item;
+  response=await h.admin(`${document.id}/publish`,'POST',{expectedRevision:item.revision});assert.equal(response.status,200);
+  item=(await response.json()).item;
+  const simple=structuredClone(document);simple.presentation='deck_collection';delete simple.guides;delete simple.guidePresentation;delete simple.units[0].checkpointQuiz;delete simple.units[0].lessons[0].cards[0].activity;
+  response=await h.admin(document.id,'PUT',{expectedRevision:item.revision,document:simple});assert.equal(response.status,200);item=(await response.json()).item;
+  response=await h.admin(`${document.id}/publish`,'POST',{expectedRevision:item.revision});assert.equal(response.status,200);
+  assert.equal((await h.db.prepare('SELECT published_revision FROM managed_catalog WHERE id=?').bind(document.id).first()).published_revision,2);
+  const live=await (await h.publicCall(document.id)).json();assert.equal(live.document.presentation,'deck_collection');assert.equal(live.document.units[0].lessons[0].cards[0].id,'c1');
+  const fresh=structuredClone(simple);fresh.id='new-language';fresh.language='French';fresh.title='French';
+  response=await h.admin('','POST',{id:fresh.id,kind:'course',document:fresh});assert.equal(response.status,201);
+  response=await h.admin(`${fresh.id}/publish`,'POST',{expectedRevision:1});assert.equal(response.status,200);
+  const manifest=await (await h.publicCall('')).json();assert.ok(manifest.items.some(item=>item.id===fresh.id&&item.revision===2));
+  assert.equal((await (await h.publicCall(fresh.id)).json()).document.presentation,'deck_collection');
+  const oldManifest=await (await h.mf.dispatchFetch('https://api.example.test/v1/catalog?profile=practice-v2',{headers:{'X-LearnAlert-Contracts':contractsFor('practice-v2').join(',')}})).json();assert.equal(oldManifest.items.find(item=>item.id===document.id).revision,2);assert.ok(!oldManifest.items.some(item=>item.id===fresh.id));
+  const invalid=structuredClone(simple);invalid.units[0].lessons[0].cards[0].activity={kind:'trace',sequence:1};
+  assert.throws(()=>validateCatalogContent('course',invalid,invalid.id,{publish:true}),error=>error.status===400);
+ } finally {await h.mf.dispose();}
+});
+
+test('choice blanks accept text and media choices while retaining index identity',()=>{
+ const document=course();delete document.units[0].lessons[0].cards[0].activity;
+ const card=document.units[0].lessons[0].cards[0];Object.assign(card,{cardType:'fillBlank',question:'Me gusta ___',options:['café','té'],correctAnswer:'café',correctOptionIndex:0});
+ assert.doesNotThrow(()=>validateCatalogContent('course',document,document.id,{publish:true}));
+ card.correctOptionIndex=5;assert.throws(()=>validateCatalogContent('course',document,document.id,{publish:true}));
 });

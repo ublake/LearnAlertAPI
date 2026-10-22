@@ -51,7 +51,7 @@ function validateAnswerability(card, path, course) {
       if (!value.trim() && !fieldHasMedia(card,`${side}:${index}`)) fail(`${path}.matching${side === 'left' ? 'Left' : 'Right'}Items[${index}]`,'add text, an image or audio for this matching item.');
     });
   }
-  const quiz = activity === 'listenChoose' || activity === 'situation' || !activity && ['multipleChoice','multiple_choice','listening'].includes(card.cardType);
+  const quiz = ['fillBlank','fill_blank'].includes(card.cardType) && (card.options?.length ?? 0) > 0 || activity === 'listenChoose' || activity === 'situation' || !activity && ['multipleChoice','multiple_choice','listening'].includes(card.cardType);
   if (quiz) {
     const options = card.options ?? [];
     if (options.length < 2) fail(`${path}.options`, 'quiz cards need at least two answer choices.');
@@ -122,6 +122,16 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
   if (kind === 'course') {
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');
     numeric(content.estimatedHours, 'content.estimatedHours'); strings(content.outcomes, 'content.outcomes');
+    if (content.presentation === 'deck_collection') {
+      if (content.learning || Object.keys(content.guides || {}).length || Object.keys(content.guidePresentation || {}).length) fail('content', 'language collections contain topic decks and cards only.');
+      for (const unit of content.units || []) {
+        if (unit.checkpointQuiz) fail('content.units', 'language collections do not use checkpoints.');
+        for (const lesson of unit.lessons || []) for (const card of lesson.cards || []) {
+          if (card.activity || card.explanation || card.grammarNote || !['multipleChoice','matching','fillBlank','vocabulary','tapReveal'].includes(card.cardType)) fail('content.units', 'use regular quiz, matching, blank or flashcard cards without explanation metadata.');
+          if (card.cardType === 'fillBlank' && (card.options?.length || 0) && !/_{2,}|\{blank\}|\[blank\]/.test(card.question)) fail('content.units', 'choice blanks need a ___ in the prompt.');
+        }
+      }
+    }
     const learning = validateLearningGraph(content.learning);
     if (learning?.starter != null && !MODERN_PROFILES.includes(deliveryProfile)) fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
     const units = array(content.units, 'content.units'); if (!units.length) fail('content.units', 'a published course needs at least one unit.');

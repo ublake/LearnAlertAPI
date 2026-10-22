@@ -373,3 +373,10 @@ test('generated usernames retry collisions atomically and preserve completed pro
     }
   } finally { await mf.dispose(); }
 });
+
+test('fill-blank choice decks preserve options, correct index and image/audio attachments',()=>{
+ const body={name:'Blank choices',description:'Practice',categoryTag:'Languages',colorHex:'#123456',deckType:'Quiz',cards:[{id:crypto.randomUUID(),cardType:'fill_blank',question:'Me gusta ___',options:['',''],correctAnswer:'',correctOptionIndex:1,fieldMedia:{'option:0':{imageID:crypto.randomUUID()},'option:1':{audioID:crypto.randomUUID()}}}]};
+ const result=validateCommunityDeck(body);assert.deepEqual(result.cards[0].options,['','']);assert.equal(result.cards[0].correctOptionIndex,1);assert.ok(result.cards[0].fieldMedia['option:1'].audioID);
+ const bad=structuredClone(body);bad.cards[0].correctOptionIndex=7;assert.throws(()=>validateCommunityDeck(bad));
+ bad.cards[0].correctOptionIndex=0;bad.cards[0].question='No blank';assert.throws(()=>validateCommunityDeck(bad));
+});
