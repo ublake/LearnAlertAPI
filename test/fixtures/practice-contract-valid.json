@@ -1,0 +1,163 @@
+{
+  "id": "practice",
+  "title": "Spanish (SP)",
+  "language": "Spanish",
+  "flagEmoji": "🇪🇸",
+  "levelTag": "Beginner",
+  "colorHex": "#42685A",
+  "summary": "Local contract fixture",
+  "estimatedHours": 1,
+  "outcomes": [],
+  "learning": {
+    "vocabulary": {
+      "es.libro.object": {
+        "lemma": "libro",
+        "article": "el",
+        "meaning": "book",
+        "locale": "es-ES",
+        "image": "catalog:00000000-0000-4000-8000-000000000001"
+      }
+    },
+    "concepts": {
+      "recognize": {
+        "title": "Recognize",
+        "vocabularyIDs": [
+          "es.libro.object"
+        ],
+        "prerequisiteIDs": []
+      },
+      "construct": {
+        "title": "Construct",
+        "vocabularyIDs": [
+          "es.libro.object"
+        ],
+        "prerequisiteIDs": [
+          "recognize"
+        ]
+      }
+    }
+  },
+  "units": [
+    {
+      "id": "u",
+      "unitNumber": 1,
+      "title": "First words",
+      "subtitle": "",
+      "colorHex": "#42685A",
+      "badgeIcon": "book",
+      "lessons": [
+        {
+          "id": "l",
+          "lessonNumber": 1,
+          "title": "Look and build",
+          "subtitle": "",
+          "nodeType": "lesson",
+          "estimatedMinutes": 3,
+          "cards": [
+            {
+              "id": "picture",
+              "question": "Find el libro",
+              "options": [
+                "A closed book",
+                "A backpack"
+              ],
+              "correctAnswer": "A closed book",
+              "correctOptionIndex": 0,
+              "cardType": "multipleChoice",
+              "fieldMedia": {
+                "option:0": {
+                  "image": "catalog:00000000-0000-4000-8000-000000000001"
+                },
+                "option:1": {
+                  "image": "catalog:00000000-0000-4000-8000-000000000002"
+                }
+              },
+              "activity": {
+                "kind": "situation",
+                "sequence": 1,
+                "exercise": {
+                  "format": "pictureChoice",
+                  "vocabularyIDs": [
+                    "es.libro.object"
+                  ],
+                  "conceptIDs": [
+                    "recognize"
+                  ],
+                  "pictures": [
+                    {
+                      "id": "book",
+                      "image": "catalog:00000000-0000-4000-8000-000000000001",
+                      "description": "A closed book"
+                    },
+                    {
+                      "id": "bag",
+                      "image": "catalog:00000000-0000-4000-8000-000000000002",
+                      "description": "A backpack"
+                    }
+                  ],
+                  "correctChoiceID": "book",
+                  "tiles": [],
+                  "acceptedOrders": []
+                }
+              }
+            },
+            {
+              "id": "bank",
+              "question": "Build: I see a book.",
+              "correctAnswer": "Veo un libro",
+              "cardType": "tokenPlacement",
+              "activity": {
+                "kind": "placeTokens",
+                "sequence": 2,
+                "tokens": [
+                  "Veo",
+                  "un",
+                  "libro"
+                ],
+                "slots": [
+                  "Veo",
+                  "un",
+                  "libro"
+                ],
+                "exercise": {
+                  "format": "wordBank",
+                  "vocabularyIDs": [
+                    "es.libro.object"
+                  ],
+                  "conceptIDs": [
+                    "construct"
+                  ],
+                  "tiles": [
+                    {
+                      "id": "see",
+                      "text": "Veo"
+                    },
+                    {
+                      "id": "a",
+                      "text": "un"
+                    },
+                    {
+                      "id": "book",
+                      "text": "libro"
+                    }
+                  ],
+                  "acceptedOrders": [
+                    [
+                      "Veo",
+                      "un",
+                      "libro"
+                    ]
+                  ],
+                  "pictures": null
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "futureMetadata": {
+    "preserved": true
+  }
+}
