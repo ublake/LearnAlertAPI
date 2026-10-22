@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { composeDelivery, requireStableDeliveryIDs } from '../src/lib/catalogDelivery.js';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -7,7 +8,7 @@ import { validateCatalogContent } from '../src/lib/catalogValidation.js';
 
 const bindings={ADMIN_ACCESS_ISSUER:'https://catalog-test.cloudflareaccess.com',ADMIN_ACCESS_AUD:'catalog-test',ADMIN_EMAILS:'admin@example.test'};
 const b64=value=>Buffer.from(typeof value==='string'?value:JSON.stringify(value)).toString('base64url');
-async function harness() {
+async function harness({through} = {}) {
   const pair=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
   const jwk={...await crypto.subtle.exportKey('jwk',pair.publicKey),kid:'catalog-test',alg:'RS256'};
   const now=Math.floor(Date.now()/1000),message=`${b64({alg:'RS256',kid:jwk.kid})}.${b64({iss:bindings.ADMIN_ACCESS_ISSUER,aud:[bindings.ADMIN_ACCESS_AUD],email:bindings.ADMIN_EMAILS,iat:now,exp:now+600})}`;
@@ -16,6 +17,7 @@ async function harness() {
   const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-09-04',bindings,d1Databases:['COMMUNITY_DB'],r2Buckets:['DECK_ASSETS'],outboundService:()=>new Response(JSON.stringify({keys:[jwk]}))}));
   const db=await mf.getD1Database('COMMUNITY_DB');
   for(const file of (await readdir(new URL('../community-migrations/',import.meta.url))).sort()) {
+    if (through && file > through) continue;
     const sql=await readFile(new URL(`../community-migrations/${file}`,import.meta.url),'utf8'),triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[];
     for(const statement of sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();
     for(const trigger of triggers)await db.prepare(trigger).run();
@@ -190,4 +192,138 @@ test('duplicating an entry clones only its owned media into a private draft and 
     assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM managed_catalog_media WHERE catalog_id=?').bind(incomplete.id).first()).n,0);
     const audit=await db.prepare("SELECT details FROM community_admin_audit WHERE target=? AND action='catalog_create'").bind(item.id).first();assert.equal(JSON.parse(audit.details).clonedMediaCount,2);
   }finally{await mf.dispose();}
+});
+
+test('delivery profiles preserve published r9 and private r10 through prepare, activation and rollback',async()=>{
+ const {mf,db,admin,publicCall,bucket}=await harness();
+ try {
+  const base={...course(),id:'spanish-course',title:'Spanish (SP) Foundations',language:'Spanish'};
+  assert.equal((await admin('','POST',{id:base.id,kind:'course',document:base})).status,201);
+  assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:1})).status,200);
+  const published=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first();
+  const paused={...base,title:'Paused r10 expansion',futureExpansion:{mustStayPrivate:true}};
+  assert.equal((await admin(base.id,'PUT',{expectedRevision:2,document:paused})).status,200);
+  const draft=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first();
+  await db.prepare("INSERT INTO managed_catalog_revisions(catalog_id,revision,action,content_key,actor,created_at,published) VALUES(?,9,'publish',?,'fixture',9,1),(?,10,'save',?,'fixture',10,0)").bind(base.id,published.published_key,base.id,draft.draft_key).run();
+  // Synthetic r9 aliases the exact approved bytes; normalise its test-only pin too.
+  await db.prepare('UPDATE managed_catalog_legacy_pins SET revision=9 WHERE catalog_id=?').bind(base.id).run();
+  await db.prepare('UPDATE managed_catalog SET revision=10,published_revision=9 WHERE id=?').bind(base.id).run();
+  const pausedBytes=await (await bucket.get(draft.draft_key)).text();
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-starter-delivery.json',import.meta.url),'utf8'));
+  for(let i=1;i<=4;i++) {const id='00000000-0000-4000-8000-'+String(i).padStart(12,'0'),key='fixture/'+id;await bucket.put(key,'fixture-image');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,?,1,?)').bind(id,base.id,key,'image/png',13,'fixture').run();}
+  const additions={units:[fixture.unit],learning:fixture.learning};
+  const release=(operation,expectedRevision,extra={})=>admin(base.id+'/delivery','POST',{operation,profile:'practice-v1',expectedRevision,...extra});
+  assert.equal((await release('prepare',10,{sourceRevision:10,additions})).status,409);
+  for(const mutate of [x=>x.learning.starter.assessment.title=7,x=>{const sense=x.learning.vocabulary['pf-sp-lex-un-one-item'];sense.lemma='';sense.article=null;},x=>x.learning.starter.assessment.forms.a[0].card.activity.exercise.conceptIDs=['unassessed']]) {const bad=structuredClone(additions);mutate(bad);assert.equal((await release('prepare',10,{sourceRevision:9,additions:bad})).status,400);}
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,404);
+  let response=await release('prepare',10,{sourceRevision:9,additions});assert.equal(response.status,200,await response.clone().text());
+  let item=(await response.json()).item;assert.equal(item.revision,11);assert.deepEqual(item.document,paused);assert.equal(item.publishedRevision,9);
+  assert.equal((await publicCall(base.id+'?revision=11')).status,404);
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,404);
+  await assert.rejects(()=>db.prepare('DELETE FROM managed_catalog_revisions WHERE catalog_id=? AND revision=11').bind(base.id).run());
+  await assert.rejects(()=>db.prepare('DELETE FROM managed_catalog_media WHERE id=?').bind('00000000-0000-4000-8000-000000000001').run());
+  const preview=(await (await admin(base.id+'?revision=11')).json()).item;assert.equal(preview.document.futureExpansion,undefined);assert.equal(preview.document.units.length,2);
+  const caps={'X-LearnAlert-Contracts':'exercise-v1,matching-evidence-v1,finite-bank-v1,route-v1,assessment-v1'};
+  const modern=path=>mf.dispatchFetch('https://api.example.test/v1/catalog'+path,{headers:caps});
+  assert.equal((await modern('/'+base.id+'?profile=practice-v1&revision=11')).status,404);
+  assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:11})).status,409);
+  response=await release('activate',11,{deliveryRevision:11});assert.equal(response.status,200,await response.clone().text());
+  assert.deepEqual((await response.json()).item.document,paused);
+  for(const [path,headers] of [['?profile=practice-v1',{}],['?profile=practice-v1',{'X-LearnAlert-Contracts':'exercise-v1'}],['?profile=unknown',caps]]) {
+   const old=await (await mf.dispatchFetch('https://api.example.test/v1/catalog'+path,{headers})).json();assert.equal(old.schemaVersion,1);assert.equal(old.items[0].revision,9);
+  }
+  const mr=await modern('?profile=practice-v1'),manifest=await mr.json();assert.equal(mr.headers.get('cache-control'),'no-store');assert.equal(manifest.schemaVersion,2);assert.equal(manifest.items[0].revision,11);assert.equal(manifest.items[0].assets.length,4);
+  const envelope=await (await modern('/'+base.id+'?profile=practice-v1&revision=11')).json(),document=JSON.parse(Buffer.from(envelope.payload,'base64').toString('utf8'));
+  assert.equal(document.id,base.id);assert.equal(document.units[0].id,base.units[0].id);assert.equal(document.units.length,2);assert.equal(document.futureExpansion,undefined);assert.equal(envelope.contentDigest,manifest.items[0].contentDigest);
+  const old=await (await publicCall()).json();assert.equal(old.items[0].revision,9);assert.equal(old.items[0].assets.length,0);assert.deepEqual((await (await publicCall(base.id)).json()).document,base);
+  await assert.rejects(()=>db.batch([db.prepare('DELETE FROM managed_catalog_public_media WHERE catalog_id=?').bind(base.id),db.prepare("UPDATE managed_catalog SET published_key=draft_key,published_revision=revision+1 WHERE id=?").bind(base.id)]));
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,200);
+  assert.equal((await release('activate',11,{deliveryRevision:11})).status,409);
+  assert.equal((await release('withdraw',12)).status,200);const fallback=await (await modern('?profile=practice-v1')).json();assert.equal(fallback.items[0].deliveryProfile,'legacy-v1');assert.notEqual(fallback.revision,manifest.revision);
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,200);
+  assert.equal((await release('rollback',13,{deliveryRevision:11})).status,200);assert.equal((await (await modern('?profile=practice-v1')).json()).items[0].revision,11);
+  assert.equal((await admin(base.id+'/archive','POST',{expectedRevision:14})).status,200);
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,404);
+  response=await release('restoreApproved',15);assert.equal(response.status,200,await response.clone().text());
+  const inserted=structuredClone(additions),extraCard=structuredClone(inserted.units[0].lessons[0].cards[0]);extraCard.id='test-extra-variant';inserted.units[0].lessons[0].cards.push(extraCard);assert.equal((await release('prepare',16,{sourceRevision:9,additions:inserted})).status,400);
+  const newCheckpoint=structuredClone(additions);newCheckpoint.units[0].checkpointQuiz=structuredClone(base.units[0].checkpointQuiz);newCheckpoint.units[0].checkpointQuiz.id='test-new-checkpoint';newCheckpoint.units[0].checkpointQuiz.questions.forEach(c=>c.id='test-starter-'+c.id);assert.equal((await release('prepare',16,{sourceRevision:9,additions:newCheckpoint})).status,400);
+  const removed=structuredClone(additions);removed.units[0].lessons[0].cards.pop();assert.equal((await release('prepare',16,{sourceRevision:9,additions:removed})).status,400);
+  const expanded=structuredClone(additions),nextLesson=structuredClone(expanded.units[0].lessons[0]);nextLesson.id='test-only-l03';nextLesson.title='Synthetic route contract fixture';nextLesson.lessonNumber=3;nextLesson.cards.forEach(c=>c.id='test-next-'+c.id);expanded.units[0].lessons.push(nextLesson);assert.equal((await release('prepare',16,{sourceRevision:9,additions:expanded})).status,400);expanded.learning.starter.lessonIDs.push(nextLesson.id);assert.equal((await release('prepare',16,{sourceRevision:9,additions:expanded})).status,400);expanded.learning.starter.revision='test-route-2';response=await release('prepare',16,{sourceRevision:9,additions:expanded});assert.equal(response.status,200,await response.clone().text());
+  const final=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first();assert.equal(final.draft_key,draft.draft_key);assert.equal(final.published_key,published.published_key);assert.equal(final.published_revision,9);assert.equal(await (await bucket.get(draft.draft_key)).text(),pausedBytes);
+ } finally {await mf.dispose();}
+});
+
+
+test('migration pins approved Spanish before preparation, failed preparation and worker rollback',async()=>{
+ const {mf,db,admin,publicCall,bucket}=await harness({through:'0014_managed_catalog.sql'});
+ try {
+  const base={...course(),id:'spanish-course',title:'Approved Spanish',language:'Spanish'};base.units[0].lessons[0].cards[0].promptImageName='catalog:00000000-0000-4000-8000-000000000001';const paused={...base,privateMarker:'must-not-leak'};
+  await bucket.put('approved-r9',JSON.stringify(base));await bucket.put('paused-r10',JSON.stringify(paused));
+  await db.prepare("INSERT INTO managed_catalog(id,kind,title,language,status,revision,draft_key,published_key,published_revision,published_title,published_at,created_at,updated_at,updated_by) VALUES('spanish-course','course','Spanish','Spanish','published',10,'paused-r10','approved-r9',9,'Approved Spanish',9,1,10,'fixture')").run();
+  await db.prepare("INSERT INTO managed_catalog_revisions(catalog_id,revision,action,content_key,actor,created_at,published) VALUES('spanish-course',9,'publish','approved-r9','fixture',9,1),('spanish-course',10,'save','paused-r10','fixture',10,0)").run();
+  await bucket.put('approved-media','fixture-image');
+  await db.prepare("INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES('00000000-0000-4000-8000-000000000001','spanish-course','approved-media','image/png',13,1,'fixture')").run();
+  await db.prepare("INSERT INTO managed_catalog_public_media(catalog_id,media_id) VALUES('spanish-course','00000000-0000-4000-8000-000000000001')").run();
+  const sql=await readFile(new URL('../community-migrations/0015_catalog_deliveries.sql',import.meta.url),'utf8'),triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[];
+  const statements=sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean);
+  await db.batch([...statements,...triggers].map(s=>db.prepare(s)));
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM managed_catalog_deliveries').first()).n,0);
+  const oldPublish=()=>db.batch([db.prepare("INSERT INTO managed_catalog_revisions(catalog_id,revision,action,content_key,actor,created_at,published) VALUES('spanish-course',11,'publish','paused-r10','old-writer',11,1)"),db.prepare("DELETE FROM managed_catalog_public_media WHERE catalog_id='spanish-course'"),db.prepare("UPDATE managed_catalog SET published_key=draft_key,published_revision=11,revision=11 WHERE id='spanish-course'")]);
+  for(const state of ['initial','failed-prepare','archived']) {
+   if(state==='failed-prepare')assert.equal((await admin('spanish-course/delivery','POST',{operation:'prepare',profile:'practice-v1',expectedRevision:10,sourceRevision:9,additions:{}})).status,400);
+   if(state==='archived')await db.prepare("UPDATE managed_catalog SET status='archived',published_key=NULL,published_revision=NULL WHERE id='spanish-course'").run();
+   await assert.rejects(oldPublish,/pinned/);
+   assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM managed_catalog_public_media WHERE catalog_id='spanish-course'").first()).n,1);
+   assert.equal(await db.prepare("SELECT revision FROM managed_catalog_revisions WHERE catalog_id='spanish-course' AND revision=11").first(),null);
+  }
+  await db.prepare("UPDATE managed_catalog SET status='published',published_key='approved-r9',published_revision=9 WHERE id='spanish-course'").run();
+  assert.deepEqual((await (await publicCall('spanish-course')).json()).document,base);
+  assert.equal(await (await bucket.get('paused-r10')).text(),JSON.stringify(paused));
+  assert.equal((await admin('spanish-course/archive','POST',{expectedRevision:10})).status,200);
+  await assert.rejects(()=>db.prepare("DELETE FROM managed_catalog_media WHERE id='00000000-0000-4000-8000-000000000001'").run());
+  const restored=await admin('spanish-course/delivery','POST',{operation:'restoreApproved',profile:'practice-v1',expectedRevision:11});
+  assert.equal(restored.status,200,await restored.clone().text());
+  assert.equal((await publicCall('media/00000000-0000-4000-8000-000000000001')).status,200);
+  assert.deepEqual((await (await publicCall('spanish-course')).json()).document,base);
+
+ } finally {await mf.dispose();}
+});
+
+test('approved modern lexical/concept semantics cannot be reassigned under existing credit IDs',async()=>{
+ const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-starter-delivery.json',import.meta.url),'utf8'));
+ const base={...course(),id:'spanish-course',language:'Spanish'}, additions={units:[fixture.unit],learning:fixture.learning};
+ const previous=composeDelivery(base,additions);validateCatalogContent('course',previous,base.id,{publish:true,deliveryProfile:'practice-v1'});
+ const vocabularyID=Object.keys(fixture.learning.vocabulary).find(id=>id.includes('dos-cardinal')),conceptID=Object.keys(fixture.learning.concepts)[0];
+ for(const mutate of [
+  d=>{d.learning.vocabulary[vocabularyID].lemma='perro';d.learning.vocabulary[vocabularyID].meaning='dog';},
+  d=>d.learning.vocabulary[vocabularyID].locale='es-MX',
+  d=>d.learning.vocabulary[vocabularyID].article='la',
+  d=>d.learning.concepts[conceptID].vocabularyIDs=[],
+  d=>d.learning.concepts[conceptID].prerequisiteIDs=[Object.keys(d.learning.concepts).find(id=>id!==conceptID)]
+ ]) {
+  const changed=structuredClone(additions);mutate(changed);const candidate=composeDelivery(base,changed);
+  assert.throws(()=>requireStableDeliveryIDs(previous,candidate),error=>error.status===400);
+ }
+ const cosmetic=structuredClone(additions);cosmetic.learning.vocabulary[vocabularyID].image='catalog:00000000-0000-4000-8000-000000000001';cosmetic.learning.vocabulary[vocabularyID].meaning='  TWO  ';cosmetic.learning.concepts[conceptID].title='A clearer display title';
+ assert.doesNotThrow(()=>requireStableDeliveryIDs(previous,composeDelivery(base,cosmetic)));
+});
+
+test('prepare and activate both reject reassigning approved modern senses',async()=>{
+ const {mf,db,admin,bucket}=await harness();
+ try {
+  const base={...course(),id:'spanish-course',title:'Spanish',language:'Spanish'};
+  assert.equal((await admin('','POST',{id:base.id,kind:'course',document:base})).status,201);
+  assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:1})).status,200);
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-starter-delivery.json',import.meta.url),'utf8'));
+  for(let i=1;i<=4;i++) {const id='00000000-0000-4000-8000-'+String(i).padStart(12,'0'),key='fixture/'+id;await bucket.put(key,'fixture-image');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,?,1,?)').bind(id,base.id,key,'image/png',13,'fixture').run();}
+  const additions={units:[fixture.unit],learning:fixture.learning},changed=structuredClone(additions);
+  changed.learning.vocabulary['pf-sp-lex-dos-cardinal-two'].lemma='perro';changed.learning.vocabulary['pf-sp-lex-dos-cardinal-two'].meaning='dog';
+  const release=(operation,expectedRevision,extra={})=>admin(base.id+'/delivery','POST',{operation,profile:'practice-v1',expectedRevision,...extra});
+  for(const [expectedRevision,data] of [[2,additions],[3,changed]]) {const response=await release('prepare',expectedRevision,{sourceRevision:2,additions:data});assert.equal(response.status,200,await response.clone().text());}
+  assert.equal((await release('activate',4,{deliveryRevision:3})).status,200);
+  for(const [operation,extra] of [['activate',{deliveryRevision:4}],['prepare',{sourceRevision:2,additions:changed}]]) {
+   const response=await release(operation,5,extra);assert.equal(response.status,400,await response.clone().text());
+  }
+  assert.equal((await db.prepare("SELECT revision FROM managed_catalog_deliveries WHERE profile='practice-v1' AND state='active'").first()).revision,3);
+ } finally {await mf.dispose();}
 });

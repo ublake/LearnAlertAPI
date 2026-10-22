@@ -1,3 +1,4 @@
+import { validateStarterDelivery } from './catalogDelivery.js';
 import { CommunityError, readCommunityJSON } from './communityValidation.js';
 
 // A transport budget, not a curriculum/card-count limit. R2 keeps large courses
@@ -67,7 +68,7 @@ function validateAnswerability(card, path, course) {
     if (!mediaChoices && new Set(options).size !== options.length) fail(`${path}.options`,'text answer choices must be distinct.');
   }
 }
-function validateCard(card, path, course, learning) {
+function validateCard(card, path, course, learning, modern = false) {
   object(card, path); string(card.id, `${path}.id`, true);
   string(card.question, `${path}.question`); string(card.correctAnswer, `${path}.correctAnswer`);
   const types = course ? courseTypes : deckTypes;
@@ -96,7 +97,7 @@ function validateCard(card, path, course, learning) {
     optionalStrings(vocab, ['breakdownNote','exampleKorean','exampleEnglish','audioText'], `${path}.vocabularyItem`);
   }
   validateAnswerability(card, path, course);
-  if (card.activity?.exercise != null) validatePracticeExercise(card, path, learning);
+  if (card.activity?.exercise != null) validatePracticeExercise(card, path, learning, modern);
   if (card.cardType === 'anki') {
     const anki = object(card.ankiContent, `${path}.ankiContent`);
     for (const field of ['frontHTML','backHTML','css','mediaFolder','noteType']) string(anki[field], `${path}.ankiContent.${field}`);
@@ -109,7 +110,7 @@ export function expectedCatalogRevision(body) {
   if (!body || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) fail('expectedRevision', 'reload the latest revision before changing content.');
   return body.expectedRevision;
 }
-export function validateCatalogContent(kind, content, id, { publish = false } = {}) {
+export function validateCatalogContent(kind, content, id, { publish = false, deliveryProfile = null } = {}) {
   if (!['course','exam'].includes(kind)) fail('kind', 'choose course or exam.');
   if (typeof id !== 'string' || !catalogIDPattern.test(id)) fail('id', 'use 1–128 letters, numbers, dots, underscores or hyphens.');
   object(content, 'content');
@@ -122,7 +123,7 @@ export function validateCatalogContent(kind, content, id, { publish = false } = 
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');
     numeric(content.estimatedHours, 'content.estimatedHours'); strings(content.outcomes, 'content.outcomes');
     const learning = validateLearningGraph(content.learning);
-    if (learning?.starter != null) fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
+    if (learning?.starter != null && deliveryProfile !== 'practice-v1') fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
     const units = array(content.units, 'content.units'); if (!units.length) fail('content.units', 'a published course needs at least one unit.');
     identifiers(units, 'content.units');
     const lessonIDs = new Set(), cardIDs = new Set(), checkpointIDs = new Set();
@@ -137,7 +138,7 @@ export function validateCatalogContent(kind, content, id, { publish = false } = 
         if (!nodeTypes.has(lesson.nodeType)) fail(`${lp}.nodeType`, 'unsupported lesson type.');
         optionalStrings(lesson, ['tipNote'], lp); const cards = array(lesson.cards, `${lp}.cards`);
         if (!cards.length) fail(`${lp}.cards`, 'a published lesson needs at least one card.');
-        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning));
+        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning, deliveryProfile === 'practice-v1'));
       });
       if (unit.checkpointQuiz != null) {
         const checkpoint = object(unit.checkpointQuiz, `${path}.checkpointQuiz`); string(checkpoint.id, `${path}.checkpointQuiz.id`, true);
@@ -147,10 +148,17 @@ export function validateCatalogContent(kind, content, id, { publish = false } = 
         strings(checkpoint.keyConcepts, `${path}.checkpointQuiz.keyConcepts`);
         const questions = array(checkpoint.questions, `${path}.checkpointQuiz.questions`);
         if (!questions.length) fail(`${path}.checkpointQuiz.questions`, 'a checkpoint needs at least one question.');
-        identifiers(questions, `${path}.checkpointQuiz.questions`, cardIDs); questions.forEach((card,c) => validateCard(card, `${path}.checkpointQuiz.questions[${c}]`, true, learning));
+        identifiers(questions, `${path}.checkpointQuiz.questions`, cardIDs); questions.forEach((card,c) => validateCard(card, `${path}.checkpointQuiz.questions[${c}]`, true, learning, deliveryProfile === 'practice-v1'));
       }
     });
     validateCoursePrerequisites(units);
+    if (deliveryProfile === 'practice-v1') {
+      const assessment = validateStarterDelivery(content);
+      for (const [form,items] of Object.entries(assessment.forms)) for (const item of items) {
+        validateCard(item.card, `content.learning.starter.assessment.forms.${form}`, true, learning, true);
+        if ((item.card.activity.exercise.prerequisiteIDs ?? []).some(id=>!cardIDs.has(id))) fail('content.learning.starter.assessment', 'assessment teaching references must belong to the course.');
+      }
+    }
     if (content.guides != null) {
       object(content.guides, 'content.guides');
       for (const [unitID, topics] of Object.entries(content.guides)) {
@@ -200,7 +208,8 @@ function validateLearningGraph(learning) {
   for (const [id, sense] of Object.entries(vocabulary)) {
     if (!catalogIDPattern.test(id)) fail('content.learning.vocabulary', 'invalid stable lexical-sense ID.');
     object(sense, `vocabulary.${id}`);
-    for (const field of ['lemma','meaning','locale']) string(sense[field], `vocabulary.${id}.${field}`, true);
+    for (const field of ['lemma','meaning','locale']) string(sense[field], `vocabulary.${id}.${field}`, field !== 'lemma');
+    if (!sense.lemma.trim() && !(typeof sense.article === 'string' && sense.article.trim())) fail(`vocabulary.${id}`, 'provide a lemma or functional article surface.');
     optionalStrings(sense, ['article','image'], `vocabulary.${id}`);
   }
   for (const [id, concept] of Object.entries(concepts)) {
@@ -219,7 +228,7 @@ function validateLearningGraph(learning) {
   Object.keys(concepts).forEach(id => visit(id));
   return learning;
 }
-function validatePracticeExercise(card, path, learning) {
+function validatePracticeExercise(card, path, learning, modern = false) {
   const exercise = object(card.activity.exercise, `${path}.activity.exercise`);
   const ep = `${path}.activity.exercise`;
   if (!['pictureChoice','choice','matching','wordBank','exposure'].includes(exercise.format)) fail(ep, 'unsupported practice format.');
@@ -299,7 +308,7 @@ function validatePracticeExercise(card, path, learning) {
   tiles.forEach((tile, index) => string(tile.text, `${ep}.tiles[${index}].text`, true));
   const orders = array(exercise.acceptedOrders, `${ep}.acceptedOrders`);
   if (!orders.length || orders.length > 20) fail(ep, 'provide one to twenty reviewed accepted orders.');
-  if (orders.length > 1) fail(ep, 'multiple accepted orders require a client capability gate before publication.');
+  if (!modern && orders.length > 1) fail(ep, 'multiple accepted orders require a client capability gate before publication.');
   orders.forEach((order, index) => {
     strings(order, `${ep}.acceptedOrders[${index}]`); if (!order.length) fail(ep, 'answers cannot be empty.');
     const inventory = tiles.map(tile => tile.text);
@@ -308,7 +317,7 @@ function validatePracticeExercise(card, path, learning) {
   if (JSON.stringify(card.activity.slots) !== JSON.stringify(orders[0]) || JSON.stringify([...(card.activity.tokens || [])].sort()) !== JSON.stringify(tiles.map(tile => tile.text).sort())) fail(ep, 'legacy tokens and slots must match the finite bank.');
   // Legacy string-identity banks cannot express duplicate required words safely.
   // Such content needs a later capability gate; keep this first rollout playable.
-  if (new Set(card.activity.tokens).size !== card.activity.tokens.length) fail(ep, 'repeated bank words require a client capability gate before publication.');
+  if (!modern && new Set(card.activity.tokens).size !== card.activity.tokens.length) fail(ep, 'repeated bank words require a client capability gate before publication.');
 }
 
 // The managed planner orders declared prerequisites by lesson sequence, while
