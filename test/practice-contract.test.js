@@ -39,3 +39,51 @@ test('shared native fixture accepts typed inactive fields and preserves unknown 
  const c=JSON.parse(readFileSync(new URL('./fixtures/practice-contract-valid.json',import.meta.url),'utf8'));
  assert.equal(validate(c).content,c);assert.deepEqual(c.futureMetadata,{preserved:true});
 });
+
+test('label/meaning choices preserve native types, explicit identity and playable legacy options',()=>{
+ const c=fixture(),card=c.units[0].lessons[0].cards[0];
+ card.options=['el libro','la mochila'];card.correctAnswer='el libro';card.optionImageNames=[];card.fieldMedia={};
+ card.question='Choose the label for this book.';card.activity.exercise={format:'choice',vocabularyIDs:['es.libro.object'],conceptIDs:['recognize'],choices:[{id:'book',text:'el libro'},{id:'bag',text:'la mochila'}],correctChoiceID:'book',prerequisiteIDs:[],stimulusText:'book'};
+ assert.equal(validate(c).content,c);
+ for(const mutate of [e=>e.choices[0].text=7,e=>e.pairs={},e=>e.prerequisiteIDs=[4],e=>e.stimulusText=5,e=>e.stimulusCount=3,e=>e.correctChoiceID='bag']){const bad=structuredClone(c);mutate(bad.units[0].lessons[0].cards[0].activity.exercise);assert.throws(()=>validate(bad));}
+});
+test('explicit two-pair matching links independent targets without crediting support and aligns fallback media',()=>{
+ const c=fixture(),card=c.units[0].lessons[0].cards[0];card.cardType='matching';card.options=[];delete card.correctOptionIndex;card.correctAnswer='Matches';card.matchingLeftItems=['el libro','la mochila'];card.matchingRightItems=['book','backpack'];card.fieldMedia={'right:0':{image:image(1)},'right:1':{image:image(2)}};
+ card.activity.kind='matchPairs';card.activity.exercise={format:'matching',vocabularyIDs:['es.libro.object'],conceptIDs:['recognize'],pairs:[{id:'p1',label:'el libro',description:'book',image:image(1),vocabularyIDs:['es.libro.object'],conceptIDs:['recognize']},{id:'p2',label:'la mochila',description:'backpack',image:image(2),vocabularyIDs:['es.libro.object'],conceptIDs:['recognize']}]};
+ assert.equal(validate(c).content,c);
+ for(const mutate of [e=>e.pairs[0].conceptIDs=['support-only'],e=>e.pairs[0].image='placeholder',e=>e.pairs[0].description='different',e=>e.pairs[0].vocabularyIDs=3]){const bad=structuredClone(c);mutate(bad.units[0].lessons[0].cards[0].activity.exercise);assert.throws(()=>validate(bad));}
+});
+test('starter route and assessment drafts round-trip but cannot publish before capability rollout',()=>{
+ const c=fixture();c.learning.starter={id:'pf-sp-starter-v1',revision:'pilot-1',lessonIDs:['pf-sp-l01','pf-sp-l02'],assessment:{futureAuthoringMetadata:true}};
+ assert.equal(validateCatalogContent('course',c,c.id).content,c);
+ assert.throws(()=>validate(c),/capability release gate/);
+});
+
+test('course prerequisites resolve earlier lesson cards and reject missing, cyclic or unsupported sequencing',()=>{
+ const valid=fixture(), first=valid.units[0].lessons[0].cards[0], second=valid.units[0].lessons[0].cards[1];
+ first.activity.exercise.prerequisiteIDs=[];second.activity.exercise.prerequisiteIDs=[first.id];
+ assert.equal(validate(valid).content,valid);
+ for(const mutate of [c=>c.units[0].lessons[0].cards[1].activity.exercise.prerequisiteIDs=['never-declared-card'],c=>c.units[0].lessons[0].cards[0].activity.exercise.prerequisiteIDs=['picture'],c=>{c.units[0].lessons[0].cards[0].activity.exercise.prerequisiteIDs=['bank'];},c=>{c.units[0].lessons[0].cards[0].activity.exercise.prerequisiteIDs=['bank'];c.units[0].lessons[0].cards[1].activity.exercise.prerequisiteIDs=[];}]) {
+  const bad=structuredClone(valid);mutate(bad);assert.throws(()=>validate(bad));
+ }
+ const cross=structuredClone(valid),lesson=cross.units[0].lessons[0];
+ cross.units[0].lessons.push({...structuredClone(lesson),id:'next-lesson',lessonNumber:2,cards:[lesson.cards.pop()]});
+ cross.futureMetadata={retained:true};assert.equal(validate(cross).content,cross);assert.deepEqual(cross.futureMetadata,{retained:true});
+ const cloned=structuredClone(cross);for(const l of cloned.units[0].lessons)for(const card of l.cards){const old=card.id;card.id='clone-'+old;card.activity.exercise.prerequisiteIDs=card.activity.exercise.prerequisiteIDs.map(id=>'clone-'+id);}
+ assert.equal(validate(cloned).content,cloned);
+});
+
+test('prerequisites follow stable sequence order, allow prior exposures and reject checkpoint teaching edges',()=>{
+ const c=fixture(),lesson=c.units[0].lessons[0],picture=lesson.cards[0],bank=lesson.cards[1];
+ const exposure=structuredClone(picture);exposure.id='reveal';exposure.activity.kind='teach';exposure.activity.example='el libro';exposure.activity.sequence=0;exposure.activity.exercise={format:'exposure',vocabularyIDs:['es.libro.object'],conceptIDs:['recognize']};
+ lesson.cards.push(exposure);picture.activity.exercise.prerequisiteIDs=['reveal'];bank.activity.exercise.prerequisiteIDs=['picture'];
+ assert.equal(validate(c).content,c);assert.equal(lesson.cards[2].id,'reveal');
+ const sameSequence=structuredClone(c);sameSequence.units[0].lessons[0].cards[2].activity.sequence=1;assert.throws(()=>validate(sameSequence),/earlier/);
+ const duplicate=structuredClone(c);duplicate.units[0].lessons[0].cards[0].activity.exercise.prerequisiteIDs=['reveal','reveal'];assert.throws(()=>validate(duplicate),/unique/);
+ c.units[0].checkpointQuiz={id:'cp',title:'Check',summary:'',passingScoreThreshold:0.8,keyConcepts:[],questions:[{...structuredClone(picture),id:'cp-q'}]};
+ assert.equal(validate(c).content,c);
+ const checkpointSource=structuredClone(c);checkpointSource.units[0].lessons[0].cards[1].activity.exercise.prerequisiteIDs=['cp-q'];assert.throws(()=>validate(checkpointSource),/checkpoint/);
+ const cpSibling=structuredClone(c);cpSibling.units[0].checkpointQuiz.questions.push({...structuredClone(picture),id:'cp-q2'});cpSibling.units[0].checkpointQuiz.questions[1].activity.exercise.prerequisiteIDs=['cp-q'];assert.throws(()=>validate(cpSibling),/checkpoint/);
+ const noGraph=structuredClone(c);delete noGraph.learning;for(const card of [...noGraph.units[0].lessons[0].cards,...noGraph.units[0].checkpointQuiz.questions])delete card.activity.exercise;
+ assert.equal(validate(noGraph).content,noGraph);
+});

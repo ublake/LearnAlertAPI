@@ -122,6 +122,7 @@ export function validateCatalogContent(kind, content, id, { publish = false } = 
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');
     numeric(content.estimatedHours, 'content.estimatedHours'); strings(content.outcomes, 'content.outcomes');
     const learning = validateLearningGraph(content.learning);
+    if (learning?.starter != null) fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
     const units = array(content.units, 'content.units'); if (!units.length) fail('content.units', 'a published course needs at least one unit.');
     identifiers(units, 'content.units');
     const lessonIDs = new Set(), cardIDs = new Set(), checkpointIDs = new Set();
@@ -149,6 +150,7 @@ export function validateCatalogContent(kind, content, id, { publish = false } = 
         identifiers(questions, `${path}.checkpointQuiz.questions`, cardIDs); questions.forEach((card,c) => validateCard(card, `${path}.checkpointQuiz.questions[${c}]`, true, learning));
       }
     });
+    validateCoursePrerequisites(units);
     if (content.guides != null) {
       object(content.guides, 'content.guides');
       for (const [unitID, topics] of Object.entries(content.guides)) {
@@ -220,7 +222,7 @@ function validateLearningGraph(learning) {
 function validatePracticeExercise(card, path, learning) {
   const exercise = object(card.activity.exercise, `${path}.activity.exercise`);
   const ep = `${path}.activity.exercise`;
-  if (!['pictureChoice','wordBank','exposure'].includes(exercise.format)) fail(ep, 'unsupported practice format.');
+  if (!['pictureChoice','choice','matching','wordBank','exposure'].includes(exercise.format)) fail(ep, 'unsupported practice format.');
   for (const field of ['vocabularyIDs','conceptIDs']) {
     strings(exercise[field], `${ep}.${field}`);
     const dictionary = field === 'vocabularyIDs' ? learning?.vocabulary : learning?.concepts;
@@ -239,6 +241,38 @@ function validatePracticeExercise(card, path, learning) {
     for (const field of ['id','text']) string(tile[field], `${ep}.tiles[${index}].${field}`);
   });
   if (exercise.acceptedOrders != null) array(exercise.acceptedOrders, `${ep}.acceptedOrders`).forEach((order, index) => strings(order, `${ep}.acceptedOrders[${index}]`));
+  if (exercise.prerequisiteIDs != null) strings(exercise.prerequisiteIDs, `${ep}.prerequisiteIDs`);
+  if (exercise.stimulusText != null) string(exercise.stimulusText, `${ep}.stimulusText`);
+  if (exercise.stimulusCount != null) { numeric(exercise.stimulusCount, `${ep}.stimulusCount`, 1); if (exercise.stimulusCount > 2) fail(ep, 'this stimulus supports one or two objects.'); }
+  if (exercise.choices != null) array(exercise.choices, `${ep}.choices`).forEach((choice,index) => {
+    object(choice, `${ep}.choices[${index}]`); for (const key of ['id','text']) string(choice[key], `${ep}.choices[${index}].${key}`);
+  });
+  if (exercise.pairs != null) array(exercise.pairs, `${ep}.pairs`).forEach((pair,index) => {
+    object(pair, `${ep}.pairs[${index}]`);
+    for (const key of ['id','label','image','description']) string(pair[key], `${ep}.pairs[${index}].${key}`);
+    for (const key of ['vocabularyIDs','conceptIDs']) strings(pair[key], `${ep}.pairs[${index}].${key}`);
+  });
+  if (exercise.format === 'choice') {
+    const choices = array(exercise.choices, `${ep}.choices`); identifiers(choices, `${ep}.choices`);
+    if (card.activity.kind !== 'situation' || choices.length < 2 || choices.length > 6 || JSON.stringify(choices.map(x=>x.text)) !== JSON.stringify(card.options)) fail(ep, 'choices need two to six legacy-aligned situation options.');
+    choices.forEach(x=>string(x.text, ep, true));
+    if (exercise.stimulusText && !card.question.toLocaleLowerCase().includes(exercise.stimulusText.toLocaleLowerCase())) fail(ep, 'the legacy prompt must retain the complete reading stimulus.');
+    const correct = choices.findIndex(x=>x.id === exercise.correctChoiceID);
+    if (correct < 0 || correct !== card.correctOptionIndex || card.correctAnswer !== card.options[correct]) fail(ep, 'choice correctness must match its legacy fallback.');
+    return;
+  }
+  if (exercise.format === 'matching') {
+    const pairs = array(exercise.pairs, `${ep}.pairs`); identifiers(pairs, `${ep}.pairs`);
+    if (card.activity.kind !== 'matchPairs' || pairs.length !== 2 || JSON.stringify(pairs.map(x=>x.label)) !== JSON.stringify(card.matchingLeftItems) || JSON.stringify(pairs.map(x=>x.description)) !== JSON.stringify(card.matchingRightItems)) fail(ep, 'two explicit pairs must match the complete legacy matching board.');
+    pairs.forEach((pair,index)=>{
+      for (const key of ['label','description']) string(pair[key], ep, true);
+      if (!/^catalog:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pair.image) || card.fieldMedia?.[`right:${index}`]?.image !== pair.image) fail(ep, 'matching needs real catalog images and aligned legacy right-side media.');
+      for (const key of ['vocabularyIDs','conceptIDs']) {
+        if (!pair[key].length || pair[key].some(id=>!exercise[key].includes(id))) fail(ep, 'pair evidence must target declared exercise concepts and senses only.');
+      }
+    });
+    return;
+  }
   if (exercise.format === 'exposure') {
     if (card.activity.kind !== 'teach' || !card.activity.example?.trim()) fail(ep, 'exposure needs a teach fallback with its short example.');
     return;
@@ -275,4 +309,42 @@ function validatePracticeExercise(card, path, learning) {
   // Legacy string-identity banks cannot express duplicate required words safely.
   // Such content needs a later capability gate; keep this first rollout playable.
   if (new Set(card.activity.tokens).size !== card.activity.tokens.length) fail(ep, 'repeated bank words require a client capability gate before publication.');
+}
+
+// The managed planner orders declared prerequisites by lesson sequence, while
+// checkpoints are shuffled and cannot teach a prerequisite for another card.
+function validateCoursePrerequisites(units) {
+  const nodes = new Map(); let rank = 0;
+  units.forEach((unit,u) => {
+    unit.lessons.forEach((lesson,l) => {
+      const cards = lesson.cards.map((card,index)=>({card,index}));
+      if (cards.some(({card})=>card.activity?.exercise?.prerequisiteIDs != null))
+        cards.sort((a,b)=>(a.card.activity?.sequence ?? 0)-(b.card.activity?.sequence ?? 0) || a.index-b.index);
+      cards.forEach(({card,index})=>nodes.set(card.id,{card,rank:rank++,checkpoint:false,path:`content.units[${u}].lessons[${l}].cards[${index}].activity.exercise.prerequisiteIDs`}));
+    });
+    for (const [index,card] of (unit.checkpointQuiz?.questions ?? []).entries())
+      nodes.set(card.id,{card,rank:rank++,checkpoint:true,path:`content.units[${u}].checkpointQuiz.questions[${index}].activity.exercise.prerequisiteIDs`});
+  });
+  const incoming = new Map(), dependents = new Map();
+  for (const [id,node] of nodes) {
+    const refs=node.card.activity?.exercise?.prerequisiteIDs ?? [];
+    if (new Set(refs).size !== refs.length) fail(node.path,'prerequisites must be unique.');
+    incoming.set(id,refs.length);
+    for (const ref of refs) {
+      if (!nodes.has(ref)) fail(node.path,'prerequisite must reference an existing course card.');
+      if (ref === id) fail(node.path,'a card cannot depend on itself.');
+      const list=dependents.get(ref) ?? [];list.push(id);dependents.set(ref,list);
+    }
+  }
+  const queue=[...incoming].filter(([,count])=>count===0).map(([id])=>id);let visited=0;
+  for (let index=0;index<queue.length;index++) {
+    const id=queue[index];visited++;
+    for (const child of dependents.get(id) ?? []) { const count=incoming.get(child)-1;incoming.set(child,count);if(count===0)queue.push(child); }
+  }
+  if (visited !== nodes.size) fail('content.units','card prerequisites must not contain cycles.');
+  for (const node of nodes.values()) for (const ref of node.card.activity?.exercise?.prerequisiteIDs ?? []) {
+    const target=nodes.get(ref);
+    if (target.checkpoint) fail(node.path,'checkpoint questions cannot teach a persistent prerequisite.');
+    if (target.rank >= node.rank) fail(node.path,'prerequisites must be taught earlier in the supported lesson order.');
+  }
 }
