@@ -1,11 +1,15 @@
 import { CommunityError } from './communityValidation.js';
 export const PRACTICE_PROFILE='practice-v1';
+export const CAFE_PROFILE='practice-v2';
+export const MODERN_PROFILES=Object.freeze([PRACTICE_PROFILE,CAFE_PROFILE]);
 export const PRACTICE_CONTRACTS=Object.freeze(['exercise-v1','matching-evidence-v1','finite-bank-v1','route-v1','assessment-v1']);
 export const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',typeof bytes==='string'?new TextEncoder().encode(bytes):bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
-export function acceptsPractice(request) {
- const url=new URL(request.url),caps=new Set((request.headers.get('X-LearnAlert-Contracts') ?? '').split(',').map(x=>x.trim()).filter(Boolean));
- return url.searchParams.get('profile')===PRACTICE_PROFILE && PRACTICE_CONTRACTS.every(x=>caps.has(x));
+export const contractsFor=profile=>profile===CAFE_PROFILE?[...PRACTICE_CONTRACTS,'text-matching-v1','finite-dialogue-v1']:profile===PRACTICE_PROFILE?[...PRACTICE_CONTRACTS]:[];
+export function acceptedPracticeProfile(request) {
+ const profile=new URL(request.url).searchParams.get('profile'),caps=new Set((request.headers.get('X-LearnAlert-Contracts') ?? '').split(',').map(x=>x.trim()).filter(Boolean));
+ return MODERN_PROFILES.includes(profile) && contractsFor(profile).every(x=>caps.has(x)) ? profile : null;
 }
+export const acceptsPractice=request=>acceptedPracticeProfile(request)!==null;
 export function composeDelivery(base, additions) {
  if(!additions || typeof additions!=='object' || Array.isArray(additions) || Object.keys(additions).some(x=>!['units','learning'].includes(x)) || !Array.isArray(additions.units) || !additions.units.length || !additions.learning || !additions.learning.starter) throw new CommunityError(400,'Provide only new units and a reviewed learning graph with a starter route.');
  const oldIDs=new Set(base.units.flatMap(u=>[u.id,...u.lessons.flatMap(l=>[l.id,...l.cards.map(c=>c.id)])]));
@@ -16,7 +20,8 @@ export function composeDelivery(base, additions) {
  const newLessons=new Set(additions.units.flatMap(u=>u.lessons.map(l=>l.id)));if(!Array.isArray(additions.learning.starter.lessonIDs)||newLessons.size!==new Set(additions.learning.starter.lessonIDs).size||additions.learning.starter.lessonIDs.some(id=>!newLessons.has(id)))throw new CommunityError(400,'The visual starter route references its additive lessons, not legacy gates.');
  const graph=base.learning ?? {vocabulary:{},concepts:{}};
  requireStableLearningSemantics({learning:graph},{learning:{vocabulary:{...graph.vocabulary,...additions.learning.vocabulary},concepts:{...graph.concepts,...additions.learning.concepts}}});
- return {...base,units:[...base.units,...additions.units],learning:{...graph,...additions.learning,vocabulary:{...graph.vocabulary,...additions.learning.vocabulary},concepts:{...graph.concepts,...additions.learning.concepts}}};
+ const guides={...base.guides};for(const unit of additions.units) {const topics=unit.lessons.filter(l=>typeof l.tipNote==='string'&&l.tipNote.trim()).map(l=>({title:l.title,rule:l.tipNote,examples:[]}));if(topics.length)guides[unit.id]=topics;}
+ return {...base,guides,units:[...base.units,...additions.units],learning:{...graph,...additions.learning,vocabulary:{...graph.vocabulary,...additions.learning.vocabulary},concepts:{...graph.concepts,...additions.learning.concepts}}};
 }
 export function validateStarterDelivery(document) {
  const s=document.learning?.starter, ids=new Set(document.units.flatMap(u=>u.lessons.map(l=>l.id))), cards=new Set(document.units.flatMap(u=>u.lessons.flatMap(l=>l.cards.map(c=>c.id))));
@@ -66,6 +71,11 @@ export function requireStableLearningSemantics(previous,candidate) {
 }
 export function requireStableDeliveryIDs(previous, candidate) {
  requireStableLearningSemantics(previous,candidate);
+ for(const [id,definition] of Object.entries(previous.learning?.dialogues ?? {})) {
+  const next=candidate.learning?.dialogues?.[id];
+  if(!next || definition.lessonID!==next.lessonID || JSON.stringify(canonical(definition.steps))!==JSON.stringify(canonical(next.steps)))throw new CommunityError(400,'Published dialogue steps and order meanings keep stable IDs; new goals need new dialogue and lesson IDs.');
+ }
+
  const ids=document=>document.units.flatMap(u=>[u.id,...u.lessons.flatMap(l=>[l.id,...l.cards.map(c=>c.id)]),...(u.checkpointQuiz?[u.checkpointQuiz.id,...u.checkpointQuiz.questions.map(c=>c.id)]:[])]);
  const available=new Set(ids(candidate));
  const oldRoute=previous.learning?.starter,nextRoute=candidate.learning?.starter;
@@ -84,4 +94,28 @@ export function requireStableDeliveryIDs(previous, candidate) {
  const scope=doc=>{const a=doc.learning?.starter?.assessment;if(!a)return null;const cards=doc.units.flatMap(u=>u.lessons).filter(l=>a.lessonIDs.includes(l.id)).flatMap(l=>l.cards);return JSON.stringify({vocabulary:[...new Set(cards.flatMap(c=>c.activity?.exercise?.vocabularyIDs ?? []))].sort(),concepts:[...new Set(cards.flatMap(c=>c.activity?.exercise?.conceptIDs ?? []))].sort()});};
  if(previous.learning?.starter?.assessment?.revision === candidate.learning?.starter?.assessment?.revision && scope(previous)!==scope(candidate))throw new CommunityError(400,'Changed assessment scope needs an explicitly reviewed assessment revision.');
  if(ids(previous).some(id=>!available.has(id)))throw new CommunityError(400,'A new delivery must retain previously published stable unit, lesson and card IDs. Use an explicit approved rollback for an older snapshot.');
+}
+
+export function validateDialogues(document,profile) {
+ const definitions=document.learning?.dialogues,all=document.units.flatMap(u=>u.lessons),cards=all.flatMap(l=>l.cards);
+ const fail=message=>{throw new CommunityError(400,message);};
+ if(definitions!=null && (typeof definitions!=='object'||Array.isArray(definitions)))fail('Dialogues must be an object.');
+ if(definitions!=null && profile!==CAFE_PROFILE)fail('Finite dialogue needs the practice-v2 capability profile.');
+ const listed=new Set(),updates=[{product:'coffee',quantity:'1'},{milk:'with_milk'},{service:'here'},{extras:'none'},{amount:'2'},{payment:'handed_over'},{farewell:'done'}];
+ for(const [id,d] of Object.entries(definitions ?? {})) {
+  if(!d || typeof d!=='object' || Array.isArray(d) || d.id!==id || ['id','revision','lessonID','title','goal','briefing'].some(k=>typeof d[k]!=='string'||!d[k].trim()))fail('A dialogue needs stable identity and complete visible briefing.');
+  const lesson=all.find(l=>l.id===d.lessonID);
+  if(!lesson || !document.learning.starter.lessonIDs.includes(d.lessonID) || !Array.isArray(d.steps)||d.steps.length!==7)fail('A bounded café has seven actions in its assigned starter lesson.');
+  const stepIDs=new Set();
+  d.steps.forEach((step,i)=>{
+   if(!step || typeof step!=='object' || typeof step.id!=='string'||!step.id.trim()||stepIDs.has(step.id)||step.cardID!==lesson.cards[i]?.id||listed.has(step.cardID) || step.turn!==[1,2,3,4,5,5,6][i] || step.substep!==['reply','reply','reply','reply','amount','handover','reply'][i] || JSON.stringify(canonical(step.updates))!==JSON.stringify(canonical(updates[i])))fail('Invalid finite café step, payment substep or order mutation.');
+   const ex=lesson.cards[i].activity?.exercise,context=ex?.context;
+   if(!['choice','wordBank'].includes(ex?.format)||context?.dialogueID!==id||context?.dialogueStepID!==step.id||typeof context.cashierText!=='string'||!context.cashierText.trim())fail('Every café action needs a supported response and readable matching cashier context.');
+   stepIDs.add(step.id);listed.add(step.cardID);
+  });
+ }
+ for(const card of cards) {
+  const context=card.activity?.exercise?.context;
+  if((context?.dialogueID!=null||context?.dialogueStepID!=null)&&!listed.has(card.id))fail('Dialogue references must belong to a declared finite step.');
+ }
 }

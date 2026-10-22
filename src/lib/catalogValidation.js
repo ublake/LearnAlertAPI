@@ -1,4 +1,4 @@
-import { validateStarterDelivery } from './catalogDelivery.js';
+import { validateStarterDelivery, validateDialogues, MODERN_PROFILES, CAFE_PROFILE } from './catalogDelivery.js';
 import { CommunityError, readCommunityJSON } from './communityValidation.js';
 
 // A transport budget, not a curriculum/card-count limit. R2 keeps large courses
@@ -123,7 +123,7 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');
     numeric(content.estimatedHours, 'content.estimatedHours'); strings(content.outcomes, 'content.outcomes');
     const learning = validateLearningGraph(content.learning);
-    if (learning?.starter != null && deliveryProfile !== 'practice-v1') fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
+    if (learning?.starter != null && !MODERN_PROFILES.includes(deliveryProfile)) fail('content.learning.starter', 'starter routes and assessments are draft/preview only until a supported-client capability release gate is deployed.');
     const units = array(content.units, 'content.units'); if (!units.length) fail('content.units', 'a published course needs at least one unit.');
     identifiers(units, 'content.units');
     const lessonIDs = new Set(), cardIDs = new Set(), checkpointIDs = new Set();
@@ -138,7 +138,7 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
         if (!nodeTypes.has(lesson.nodeType)) fail(`${lp}.nodeType`, 'unsupported lesson type.');
         optionalStrings(lesson, ['tipNote'], lp); const cards = array(lesson.cards, `${lp}.cards`);
         if (!cards.length) fail(`${lp}.cards`, 'a published lesson needs at least one card.');
-        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning, deliveryProfile === 'practice-v1'));
+        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning, deliveryProfile));
       });
       if (unit.checkpointQuiz != null) {
         const checkpoint = object(unit.checkpointQuiz, `${path}.checkpointQuiz`); string(checkpoint.id, `${path}.checkpointQuiz.id`, true);
@@ -148,14 +148,16 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
         strings(checkpoint.keyConcepts, `${path}.checkpointQuiz.keyConcepts`);
         const questions = array(checkpoint.questions, `${path}.checkpointQuiz.questions`);
         if (!questions.length) fail(`${path}.checkpointQuiz.questions`, 'a checkpoint needs at least one question.');
-        identifiers(questions, `${path}.checkpointQuiz.questions`, cardIDs); questions.forEach((card,c) => validateCard(card, `${path}.checkpointQuiz.questions[${c}]`, true, learning, deliveryProfile === 'practice-v1'));
+        identifiers(questions, `${path}.checkpointQuiz.questions`, cardIDs); questions.forEach((card,c) => validateCard(card, `${path}.checkpointQuiz.questions[${c}]`, true, learning, deliveryProfile));
       }
     });
     validateCoursePrerequisites(units);
-    if (deliveryProfile === 'practice-v1') {
+    if (MODERN_PROFILES.includes(deliveryProfile)) {
+      validateDialogues(content,deliveryProfile);
       const assessment = validateStarterDelivery(content);
       for (const [form,items] of Object.entries(assessment.forms)) for (const item of items) {
-        validateCard(item.card, `content.learning.starter.assessment.forms.${form}`, true, learning, true);
+        validateCard(item.card, `content.learning.starter.assessment.forms.${form}`, true, learning, deliveryProfile);
+        if(item.card.activity.exercise.context!=null || item.card.activity.exercise.models!=null || !['choice','pictureChoice','wordBank'].includes(item.card.activity.exercise.format))fail('content.learning.starter.assessment','The scoped starter check uses only unassisted choices and finite banks, never dialogue or reveal semantics.');
         if ((item.card.activity.exercise.prerequisiteIDs ?? []).some(id=>!cardIDs.has(id))) fail('content.learning.starter.assessment', 'assessment teaching references must belong to the course.');
       }
     }
@@ -231,13 +233,28 @@ function validateLearningGraph(learning) {
 function validatePracticeExercise(card, path, learning, modern = false) {
   const exercise = object(card.activity.exercise, `${path}.activity.exercise`);
   const ep = `${path}.activity.exercise`;
-  if (!['pictureChoice','choice','matching','wordBank','exposure'].includes(exercise.format)) fail(ep, 'unsupported practice format.');
+  if (!['pictureChoice','choice','matching','textMatching','wordBank','exposure'].includes(exercise.format)) fail(ep, 'unsupported practice format.');
   for (const field of ['vocabularyIDs','conceptIDs']) {
     strings(exercise[field], `${ep}.${field}`);
     const dictionary = field === 'vocabularyIDs' ? learning?.vocabulary : learning?.concepts;
     if (exercise[field].some(id => !dictionary || !Object.hasOwn(dictionary, id))) fail(`${ep}.${field}`, 'reference a declared lexical sense or concept.');
   }
   if (!exercise.vocabularyIDs.length || !exercise.conceptIDs.length) fail(ep, 'link at least one lexical sense and concept.');
+  if ((exercise.format==='textMatching'||exercise.context!=null||exercise.models!=null||exercise.showsMeaningLabels!=null) && modern!==CAFE_PROFILE) fail(ep,'Contextual practice needs practice-v2 capability delivery.');
+  if (exercise.showsMeaningLabels!=null && typeof exercise.showsMeaningLabels!=='boolean') fail(ep,'showsMeaningLabels must be boolean.');
+  if (exercise.models!=null) array(exercise.models,`${ep}.models`).forEach((model,i)=>{
+    object(model,`${ep}.models[${i}]`);for(const key of ['spanish','meaning'])string(model[key],`${ep}.models[${i}].${key}`,true);
+  });
+  if (exercise.context!=null) {
+    const context=object(exercise.context,`${ep}.context`);
+    for(const key of ['cashierText','goalText','goalFeedback','dialogueID','dialogueStepID','audioReference']) if(context[key]!=null)string(context[key],`${ep}.context.${key}`,true);
+    if((context.dialogueID==null)!==(context.dialogueStepID==null))fail(ep,'Dialogue and step identity must be provided together.');
+    if(context.goalMismatchChoiceIDs!=null)strings(context.goalMismatchChoiceIDs,`${ep}.context.goalMismatchChoiceIDs`);
+    if(context.goalMismatchOrders!=null)array(context.goalMismatchOrders,`${ep}.context.goalMismatchOrders`).forEach((order,i)=>strings(order,`${ep}.context.goalMismatchOrders[${i}]`));
+    if(context.audioReference!=null) {
+      if(!/^catalog:[0-9a-f-]{36}$/i.test(context.audioReference)||learning?.audioQA?.status!=='owner-approved'||typeof learning.audioQA.reviewNote!=='string'||!learning.audioQA.reviewNote.trim())fail(ep,'Stored cashier audio requires explicit owner QA approval metadata before publication.');
+    }
+  }
   // Codable decodes every known optional property, even when this format
   // does not render it. Validate all present shapes before semantic branches.
   if (exercise.correctChoiceID != null) string(exercise.correctChoiceID, `${ep}.correctChoiceID`);
@@ -261,6 +278,10 @@ function validatePracticeExercise(card, path, learning, modern = false) {
     for (const key of ['id','label','image','description']) string(pair[key], `${ep}.pairs[${index}].${key}`);
     for (const key of ['vocabularyIDs','conceptIDs']) strings(pair[key], `${ep}.pairs[${index}].${key}`);
   });
+  if(exercise.context!=null) { const context=exercise.context;
+    if(context.goalMismatchChoiceIDs?.some(id=>id===exercise.correctChoiceID||!exercise.choices?.some(c=>c.id===id)))fail(ep,'Goal-mismatch choices must be offered non-target replies.');
+    if(context.goalMismatchOrders?.some(order=>!order.length||order.some(word=>order.filter(x=>x===word).length>(exercise.tiles ?? []).filter(x=>x.text===word).length)||exercise.acceptedOrders?.some(x=>JSON.stringify(x)===JSON.stringify(order))))fail(ep,'Goal-mismatch orders must be constructible non-target variants.');
+  }
   if (exercise.format === 'choice') {
     const choices = array(exercise.choices, `${ep}.choices`); identifiers(choices, `${ep}.choices`);
     if (card.activity.kind !== 'situation' || choices.length < 2 || choices.length > 6 || JSON.stringify(choices.map(x=>x.text)) !== JSON.stringify(card.options)) fail(ep, 'choices need two to six legacy-aligned situation options.');
@@ -270,12 +291,13 @@ function validatePracticeExercise(card, path, learning, modern = false) {
     if (correct < 0 || correct !== card.correctOptionIndex || card.correctAnswer !== card.options[correct]) fail(ep, 'choice correctness must match its legacy fallback.');
     return;
   }
-  if (exercise.format === 'matching') {
+  if (['matching','textMatching'].includes(exercise.format)) {
     const pairs = array(exercise.pairs, `${ep}.pairs`); identifiers(pairs, `${ep}.pairs`);
     if (card.activity.kind !== 'matchPairs' || pairs.length !== 2 || JSON.stringify(pairs.map(x=>x.label)) !== JSON.stringify(card.matchingLeftItems) || JSON.stringify(pairs.map(x=>x.description)) !== JSON.stringify(card.matchingRightItems)) fail(ep, 'two explicit pairs must match the complete legacy matching board.');
     pairs.forEach((pair,index)=>{
       for (const key of ['label','description']) string(pair[key], ep, true);
-      if (!/^catalog:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pair.image) || card.fieldMedia?.[`right:${index}`]?.image !== pair.image) fail(ep, 'matching needs real catalog images and aligned legacy right-side media.');
+      if (exercise.format==='textMatching') { if(pair.image!==''||card.fieldMedia?.[`right:${index}`]?.image)fail(ep,'Text matching has readable meanings, not invented image references.'); }
+      else if (!/^catalog:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pair.image) || card.fieldMedia?.[`right:${index}`]?.image !== pair.image) fail(ep, 'matching needs real catalog images and aligned legacy right-side media.');
       for (const key of ['vocabularyIDs','conceptIDs']) {
         if (!pair[key].length || pair[key].some(id=>!exercise[key].includes(id))) fail(ep, 'pair evidence must target declared exercise concepts and senses only.');
       }

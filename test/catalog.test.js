@@ -327,3 +327,114 @@ test('prepare and activate both reject reassigning approved modern senses',async
   assert.equal((await db.prepare("SELECT revision FROM managed_catalog_deliveries WHERE profile='practice-v1' AND state='active'").first()).revision,3);
  } finally {await mf.dispose();}
 });
+
+test('six-lesson café contract validates59 additions, finite variants and profile separation',async()=>{
+ const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-cafe-delivery.json',import.meta.url),'utf8'));
+ const base={...course(),id:'spanish-course',language:'Spanish'},document=composeDelivery(base,{units:[fixture.unit],learning:fixture.learning});
+ const summary=validateCatalogContent('course',document,base.id,{publish:true,deliveryProfile:'practice-v2'}).summary;
+ assert.equal(summary.cardCount,91);assert.equal(fixture.unit.lessons.length,6);assert.equal(fixture.unit.lessons.flatMap(l=>l.cards).length,89);
+ assert.equal(fixture.unit.lessons.slice(2).flatMap(l=>l.cards).filter(c=>c.activity.exercise.format==='exposure').length,21);
+ assert.deepEqual(document.learning.starter.assessment.lessonIDs,['pf-sp-l01','pf-sp-l02']);
+ assert.throws(()=>validateCatalogContent('course',document,base.id,{publish:true,deliveryProfile:'practice-v1'}),e=>e.status===400);
+ for(const card of fixture.unit.lessons.flatMap(l=>l.cards)) {
+  const e=card.activity.exercise,inventory=e.tiles?.map(t=>t.text) ?? [];
+  for(const order of [...(e.acceptedOrders ?? []),...(e.context?.goalMismatchOrders ?? [])])for(const word of order)assert.ok(order.filter(x=>x===word).length<=inventory.filter(x=>x===word).length);
+ }
+});
+
+test('café typed inactive fields, goal variants and order mutations fail closed; unknown properties survive',async()=>{
+ const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-cafe-delivery.json',import.meta.url),'utf8')),base={...course(),id:'spanish-course',language:'Spanish'};
+ const valid=()=>composeDelivery(base,{units:[structuredClone(fixture.unit)],learning:structuredClone(fixture.learning)});
+ const validate=d=>validateCatalogContent('course',d,base.id,{publish:true,deliveryProfile:'practice-v2'});
+ for(const mutate of [
+  d=>d.units.at(-1).lessons[3].cards[0].activity.exercise.models[0].meaning=9,
+  d=>d.units.at(-1).lessons[2].cards[0].activity.exercise.context={goalMismatchChoiceIDs:['missing']},
+  d=>{const e=d.units.at(-1).lessons[3].cards.find(c=>c.activity.exercise.format==='wordBank').activity.exercise;e.context.goalMismatchOrders=[['untaught']];},
+  d=>{const e=d.units.at(-1).lessons[3].cards.find(c=>c.activity.exercise.format==='wordBank').activity.exercise;e.tiles={};e.context.goalMismatchOrders=[['bad']];},
+  d=>d.learning.dialogues['pf-sp-cafe-visit'].steps[5].substep='amount',
+  d=>d.learning.dialogues['pf-sp-cafe-visit'].steps[4].updates={amount:'99'},
+  d=>d.units.at(-1).lessons.at(-1).cards[0].activity.exercise.context.dialogueStepID='missing',
+  d=>d.units.at(-1).lessons.at(-1).cards[0].activity.exercise.context.audioReference='catalog:3247493d-5667-5552-a4f0-92212346831d'
+ ]) {const d=valid();mutate(d);assert.throws(()=>validate(d),e=>e.status===400);}
+ const unknown=valid();unknown.learning.dialogues['pf-sp-cafe-visit'].reviewExtension={keep:'intact'};unknown.units.at(-1).lessons[3].cards[0].activity.exercise.models[0].futureMetadata={keep:true};assert.equal(validate(unknown).content,unknown);
+ const approved=valid();approved.learning.audioQA={status:'owner-approved',reviewNote:'Synthetic fixture only; not real owner approval'};approved.units.at(-1).lessons.at(-1).cards[0].activity.exercise.context.audioReference='catalog:3247493d-5667-5552-a4f0-92212346831d';assert.doesNotThrow(()=>validate(approved));
+});
+
+test('v1 and v2 deliveries independently protect default r9, paused r10 and immutable media',async()=>{
+ const {mf,db,admin,publicCall,bucket}=await harness();
+ try {
+  const base={...course(),id:'spanish-course',title:'Spanish (SP)',language:'Spanish'};
+  assert.equal((await admin('','POST',{id:base.id,kind:'course',document:base})).status,201);
+  assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:1})).status,200);
+  const approved=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first();
+  const paused={...base,privateExpansion:{mustRemainPrivate:true}};assert.equal((await admin(base.id,'PUT',{expectedRevision:2,document:paused})).status,200);
+  const privateRow=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first(),privateBytes=await (await bucket.get(privateRow.draft_key)).text();
+  const first=JSON.parse(await readFile(new URL('./fixtures/visual-starter-delivery.json',import.meta.url),'utf8')),six=JSON.parse(await readFile(new URL('./fixtures/visual-cafe-delivery.json',import.meta.url),'utf8'));
+  const allRefs=value=>{const set=new Set();const walk=x=>{if(typeof x==='string'&&x.startsWith('catalog:'))set.add(x.slice(8));else if(x&&typeof x==='object')Object.values(x).forEach(walk);};walk(value);return set;};
+  for(const id of new Set([...allRefs(first),...allRefs(six)])) {const key='fixture/'+id;await bucket.put(key,'fixture-image');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,?,1,?)').bind(id,base.id,key,'image/png',13,'fixture').run();}
+  const release=(profile,operation,expectedRevision,extra={})=>admin(base.id+'/delivery','POST',{profile,operation,expectedRevision,...extra});
+  assert.equal((await release('practice-v1','prepare',3,{sourceRevision:2,additions:{units:[first.unit],learning:first.learning}})).status,200);
+  assert.equal((await release('practice-v1','activate',4,{deliveryRevision:4})).status,200);
+  const caps='exercise-v1,matching-evidence-v1,finite-bank-v1,route-v1,assessment-v1',get=(path,contracts=caps+',text-matching-v1,finite-dialogue-v1')=>mf.dispatchFetch('https://api.example.test/v1/catalog'+path,{headers:{'X-LearnAlert-Contracts':contracts}});
+  const fallback=await (await get('?profile=practice-v2')).json();assert.equal(fallback.deliveryProfile,'practice-v2');assert.equal(fallback.items[0].deliveryProfile,'practice-v1');
+  let response=await release('practice-v2','prepare',5,{sourceRevision:2,additions:{units:[six.unit],learning:six.learning}});assert.equal(response.status,200,await response.clone().text());
+  assert.equal((await get('/'+base.id+'?profile=practice-v2&revision=6')).status,404);
+  assert.equal((await release('practice-v2','activate',6,{deliveryRevision:6})).status,200);
+  for(const profile of ['practice-v1','practice-v2']) {
+   const manifest=await (await get('?profile='+profile)).json(),item=manifest.items[0];assert.equal(item.deliveryProfile,profile);
+   const envelope=await (await get('/'+base.id+'?profile='+profile+'&revision='+item.revision)).json(),document=JSON.parse(Buffer.from(envelope.payload,'base64').toString('utf8'));
+   assert.equal(document.units.at(-1).lessons.length,profile==='practice-v1'?2:6);assert.equal(document.privateExpansion,undefined);
+  }
+  const partial=await (await get('?profile=practice-v2',caps)).json();assert.equal(partial.schemaVersion,1);assert.equal(partial.items[0].revision,2);
+  assert.deepEqual((await (await publicCall(base.id)).json()).document,base);
+  assert.equal((await release('practice-v2','withdraw',7)).status,200);
+  assert.equal((await (await get('?profile=practice-v2')).json()).items[0].deliveryProfile,'practice-v1');
+  await assert.rejects(()=>db.prepare('DELETE FROM managed_catalog_revisions WHERE catalog_id=? AND revision=6').bind(base.id).run());
+  const final=await db.prepare('SELECT * FROM managed_catalog WHERE id=?').bind(base.id).first();assert.equal(final.published_key,approved.published_key);assert.equal(final.draft_key,privateRow.draft_key);assert.equal(await (await bucket.get(final.draft_key)).text(),privateBytes);
+ } finally {await mf.dispose();}
+});
+
+test('profile-index migration retains populated v1 rows, media FKs and approved publication guards',async()=>{
+ const {mf,db,admin,bucket}=await harness({through:'0015_catalog_deliveries.sql'});
+ try {
+  const base={...course(),id:'spanish-course',language:'Spanish'};assert.equal((await admin('','POST',{id:base.id,kind:'course',document:base})).status,201);assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:1})).status,200);
+  const f=JSON.parse(await readFile(new URL('./fixtures/visual-starter-delivery.json',import.meta.url),'utf8'));
+  for(let i=1;i<=4;i++){const id='00000000-0000-4000-8000-'+String(i).padStart(12,'0');await bucket.put(id,'image');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,5,1,?)').bind(id,base.id,id,'image/png','fixture').run();}
+  assert.equal((await admin(base.id+'/delivery','POST',{operation:'prepare',profile:'practice-v1',expectedRevision:2,sourceRevision:2,additions:{units:[f.unit],learning:f.learning}})).status,200);
+  const before=(await db.prepare('SELECT * FROM managed_catalog_deliveries ORDER BY profile,revision').all()).results,media=(await db.prepare('SELECT * FROM managed_catalog_delivery_media ORDER BY media_id').all()).results;
+  const sql=await readFile(new URL('../community-migrations/0016_cafe_delivery_profile.sql',import.meta.url),'utf8'),triggers=sql.match(/CREATE TRIGGER[\s\S]*?END;/g)||[],statements=sql.replace(/CREATE TRIGGER[\s\S]*?END;/g,'').split(';').map(s=>s.trim()).filter(Boolean);
+  await db.batch([...statements,...triggers].map(s=>db.prepare(s)));
+  assert.deepEqual((await db.prepare('SELECT * FROM managed_catalog_deliveries ORDER BY profile,revision').all()).results,before);
+  assert.deepEqual((await db.prepare('SELECT * FROM managed_catalog_delivery_media ORDER BY media_id').all()).results,media);
+  await assert.rejects(()=>db.prepare("UPDATE managed_catalog SET published_revision=3,published_key=draft_key WHERE id='spanish-course'").run());
+  await assert.rejects(()=>db.prepare('DELETE FROM managed_catalog_revisions WHERE catalog_id=? AND revision=3').bind(base.id).run());
+ } finally {await mf.dispose();}
+});
+
+
+test('cashier audio references enforce approval, ownership and audio type at prepare and activation',async()=>{
+ const {mf,db,admin,bucket}=await harness();
+ try {
+  const base={...course(),id:'spanish-course',language:'Spanish'};
+  assert.equal((await admin('','POST',{id:base.id,kind:'course',document:base})).status,201);
+  assert.equal((await admin(base.id+'/publish','POST',{expectedRevision:1})).status,200);
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/visual-cafe-delivery.json',import.meta.url),'utf8'));
+  const refs=new Set();const walk=x=>{if(typeof x==='string'&&x.startsWith('catalog:'))refs.add(x.slice(8));else if(x&&typeof x==='object')Object.values(x).forEach(walk);};walk(fixture);
+  for(const id of refs){const key='audio-type-test/image/'+id;await bucket.put(key,'fixture-image');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,13,1,?)').bind(id,base.id,key,'image/png','fixture').run();}
+  const audio='00000000-0000-4000-8000-000000000091',foreign='00000000-0000-4000-8000-000000000092',other={...course(),id:'other-course'};
+  assert.equal((await admin('','POST',{id:other.id,kind:'course',document:other})).status,201);
+  for(const [id,owner] of [[audio,base.id],[foreign,other.id]]){const key='audio-type-test/audio/'+id;await bucket.put(key,'synthetic-audio');await db.prepare('INSERT INTO managed_catalog_media(id,catalog_id,object_key,content_type,byte_size,created_at,actor) VALUES(?,?,?,?,15,1,?)').bind(id,owner,key,'audio/mpeg','fixture').run();}
+  const candidate=(reference,approved=true)=>{const f=structuredClone(fixture);if(approved)f.learning.audioQA={status:'owner-approved',reviewNote:'Synthetic fixture approval only, not real audio QA'};f.unit.lessons[5].cards[0].activity.exercise.context.audioReference='catalog:'+reference;return {units:[f.unit],learning:f.learning};};
+  const prepare=additions=>admin(base.id+'/delivery','POST',{operation:'prepare',profile:'practice-v2',expectedRevision:2,sourceRevision:2,additions});
+  for(const [reference,approved] of [[refs.values().next().value,true],[audio,false],[foreign,true]]){const response=await prepare(candidate(reference,approved));assert.equal(response.status,400,await response.clone().text());}
+  const response=await prepare(candidate(audio));assert.equal(response.status,200,await response.clone().text());
+  // Activation re-reads real typed metadata; immutable content/digest stay intact.
+  for(const type of ['image/png','application/octet-stream']) {
+   await db.prepare('UPDATE managed_catalog_media SET content_type=? WHERE id=?').bind(type,audio).run();
+   const denied=await admin(base.id+'/delivery','POST',{operation:'activate',profile:'practice-v2',expectedRevision:3,deliveryRevision:3});assert.equal(denied.status,400);
+   assert.equal((await db.prepare('SELECT revision FROM managed_catalog WHERE id=?').bind(base.id).first()).revision,3);
+  }
+  await db.prepare("UPDATE managed_catalog_media SET content_type='audio/mpeg' WHERE id=?").bind(audio).run();
+  assert.equal((await admin(base.id+'/delivery','POST',{operation:'activate',profile:'practice-v2',expectedRevision:3,deliveryRevision:3})).status,200);
+ } finally {await mf.dispose();}
+});

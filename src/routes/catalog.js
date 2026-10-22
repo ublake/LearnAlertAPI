@@ -1,4 +1,4 @@
-import { PRACTICE_PROFILE, PRACTICE_CONTRACTS, acceptsPractice, composeDelivery, requireStableDeliveryIDs, digest } from '../lib/catalogDelivery.js';
+import { PRACTICE_PROFILE, CAFE_PROFILE, MODERN_PROFILES, contractsFor, acceptedPracticeProfile, acceptsPractice, composeDelivery, requireStableDeliveryIDs, requireStableLearningSemantics, digest } from '../lib/catalogDelivery.js';
 import { speechStudio } from './speechStudio.js';
 import { catalogSpeech } from '../lib/catalogSpeech.js';
 import { adminIdentity } from '../lib/adminAuth.js';
@@ -24,7 +24,7 @@ function mediaReferences(document) {
   function visit(value, field = '') {
     if (typeof value === 'string' && value.startsWith('catalog:')) {
       const id = value.slice(8); if (!uuidPattern.test(id)) throw new CommunityError(400, 'Invalid catalog media reference.');
-      const kind = /^(image|imageID)$|Image(?:ID|Name|IDs|Names)$/.test(field) ? 'image' : /^(audio|audioID)$|Audio(?:ID|Name|IDs|Names)$/.test(field) ? 'audio' : null;
+      const kind = /^(image|imageID)$|Image(?:ID|Name|IDs|Names)$/.test(field) ? 'image' : /^(audio|audioID|audioReference)$|Audio(?:ID|Name|IDs|Names)$/.test(field) ? 'audio' : null;
       if (!references.has(id)) references.set(id, new Set());
       if (kind) references.get(id).add(kind);
     } else if (Array.isArray(value)) value.forEach(item => visit(item, field));
@@ -257,7 +257,7 @@ export async function adminCatalog(request, env) {
     }
     if ((action==='publish'||action==='archive')&&method==='POST'||!action&&method==='DELETE') {
       const body=await readCatalogJSON(request); requireRevision(row,body); note(body);
-      if (action === 'publish' && ((row.id === 'spanish-course' && row.published_key) || await db.prepare("SELECT 1 FROM managed_catalog_deliveries WHERE catalog_id=? AND profile='practice-v1' LIMIT 1").bind(row.id).first())) throw new CommunityError(409,'This course uses explicit delivery releases. Publishing its saved draft through the legacy path is disabled.');
+      if (action === 'publish' && ((row.id === 'spanish-course' && row.published_key) || await db.prepare("SELECT 1 FROM managed_catalog_deliveries WHERE catalog_id=? AND profile IN ('practice-v1','practice-v2') LIMIT 1").bind(row.id).first())) throw new CommunityError(409,'This course uses explicit delivery releases. Publishing its saved draft through the legacy path is disabled.');
       const publishing=action==='publish', next=row.revision+1, stamp=seconds(), effective=publishing?'publish':'archive';
       const document=await documentFor(env,row.draft_key);
       const validated=validateCatalogContent(row.kind,document,row.id,{publish:publishing});
@@ -284,7 +284,7 @@ export async function publicCatalog(request,env) {
     if(!env.COMMUNITY_DB||!env.DECK_ASSETS)throw new CommunityError(503,'Catalog storage is unavailable.');
     const url=new URL(request.url),path=url.pathname.slice('/v1/catalog'.length).replace(/^\//,'');
     if(!['GET','HEAD'].includes(request.method))throw new CommunityError(405,'Use GET to browse the catalog.');
-    if(acceptsPractice(request) && !path) return await practiceManifest(env);
+    if(acceptsPractice(request) && !path) return await practiceManifest(env,acceptedPracticeProfile(request));
     if(!path) {
       const snapshot=await env.COMMUNITY_DB.batch([
         env.COMMUNITY_DB.prepare('SELECT revision,initialized FROM managed_catalog_state WHERE id=1'),
@@ -300,7 +300,7 @@ export async function publicCatalog(request,env) {
     if(!catalogIDPattern.test(path))throw new CommunityError(404,'Catalog item not found.');
     const row=await current(env.COMMUNITY_DB,path);
     if(row.status!=='published'||!row.published_key)throw new CommunityError(404,'Catalog item not found.');
-    if(acceptsPractice(request)) return await practiceDocument(request, env, row);
+    if(acceptsPractice(request)) return await practiceDocument(request, env, row,acceptedPracticeProfile(request));
     let key=row.published_key,revision=row.published_revision;
     if(url.searchParams.has('revision')) {
       const requested=Number(url.searchParams.get('revision'));
@@ -322,7 +322,8 @@ async function deliveryAction(request, env, row, actor) {
  if(request.method==='GET')return reply({items:(await db.prepare('SELECT * FROM managed_catalog_deliveries WHERE catalog_id=? ORDER BY revision DESC').bind(row.id).all()).results});
  if(request.method!=='POST')throw new CommunityError(405,'Use GET or POST for delivery releases.');
  const body=await readCatalogJSON(request);requireRevision(row,body);note(body);
- if(body.operation === 'restoreApproved' && body.profile === PRACTICE_PROFILE && row.kind === 'course' && row.status === 'archived') {
+ const profile=body.profile;
+ if(body.operation === 'restoreApproved' && MODERN_PROFILES.includes(profile) && row.kind === 'course' && row.status === 'archived') {
   const legacy=await db.prepare("SELECT d.*,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile='legacy-v1' AND d.state='active'").bind(row.id).first()
    ?? await db.prepare("SELECT p.revision,p.content_key,c.published_title AS title FROM managed_catalog_legacy_pins p JOIN managed_catalog c ON c.id=p.catalog_id WHERE p.catalog_id=?").bind(row.id).first();
   if(!legacy)throw new CommunityError(409,'No retained approved legacy delivery is available.');
@@ -336,7 +337,7 @@ async function deliveryAction(request, env, row, actor) {
   const result=await db.batch(statements);if(!result.at(-1).meta.changes)throw new CommunityError(409,'Catalog changed during restore.','CATALOG_CONFLICT');
   return reply({item:await itemFor(env,await current(db,row.id))});
  }
- if(body.profile!==PRACTICE_PROFILE || row.kind!=='course' || row.status!=='published')throw new CommunityError(400,'Select practice-v1 on an existing published course.');
+ if(!MODERN_PROFILES.includes(profile) || row.kind!=='course' || row.status!=='published')throw new CommunityError(400,'Select a supported practice profile on an existing published course.');
  const next=row.revision+1,stamp=seconds(),guard='EXISTS(SELECT 1 FROM managed_catalog WHERE id=? AND revision=?)';
  const baseSnapshot=await db.prepare('SELECT content_key FROM managed_catalog_revisions WHERE catalog_id=? AND revision=? AND published=1').bind(row.id,row.published_revision).first();
  if(!baseSnapshot)throw new CommunityError(409,'The published legacy source is unavailable.');
@@ -345,46 +346,59 @@ async function deliveryAction(request, env, row, actor) {
  const bootstrap=db.prepare(`INSERT OR IGNORE INTO managed_catalog_deliveries(catalog_id,profile,revision,source_revision,state,digest,contracts_json,media_ids_json,title,created_at,activated_at) SELECT ?,'legacy-v1',?,?,'active',?,'[]',?,?,?,? WHERE ${guard}`).bind(row.id,row.published_revision,row.published_revision,baseDigest,JSON.stringify(baseRefs),row.published_title,stamp,row.published_at,row.id,row.revision);
  if(body.operation==='prepare') {
   if(body.sourceRevision!==row.published_revision)throw new CommunityError(409,'Explicitly choose the current published legacy source; saved drafts are never delivery sources.');
-  const document=composeDelivery(base,body.additions),validated=validateCatalogContent(row.kind,document,row.id,{publish:true,deliveryProfile:PRACTICE_PROFILE}),refs=await checkMedia(db,row.id,document);
-  const latest=await db.prepare("SELECT r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile='practice-v1' AND d.activated_at IS NOT NULL ORDER BY d.revision DESC LIMIT 1").bind(row.id).first();
-  if(latest)requireStableDeliveryIDs(await documentFor(env,latest.content_key),document);
+  const document=composeDelivery(base,body.additions),validated=validateCatalogContent(row.kind,document,row.id,{publish:true,deliveryProfile:profile}),refs=await checkMedia(db,row.id,document);
+  await requireApprovedHistory(env,row.id,profile,document);
   const bytes=JSON.stringify(document),hash=await digest(bytes),key=`catalog/${row.id}/delivery/${next}-${crypto.randomUUID()}.json`;
   await env.DECK_ASSETS.put(key,bytes,{httpMetadata:{contentType:'application/json'}});
   try {
-   const result=await db.batch([bootstrap,revisionInsert(db,row,next,'prepare_delivery',key,actor,body,false),db.prepare(`INSERT INTO managed_catalog_deliveries(catalog_id,profile,revision,source_revision,state,digest,contracts_json,media_ids_json,title,created_at) SELECT ?,?,?,?,'candidate',?,?,?,?,? WHERE ${guard}`).bind(row.id,PRACTICE_PROFILE,next,body.sourceRevision,hash,JSON.stringify(PRACTICE_CONTRACTS),JSON.stringify(refs),validated.title,stamp,row.id,row.revision),...mediaPins('legacy-v1',row.published_revision,baseRefs),...mediaPins(PRACTICE_PROFILE,next,refs),audit(db,actor,row.id,'prepare_delivery',{revision:next,sourceRevision:body.sourceRevision,profile:PRACTICE_PROFILE,digest:hash},row.revision),db.prepare('UPDATE managed_catalog SET revision=?,updated_at=?,updated_by=? WHERE id=? AND revision=?').bind(next,stamp,actor,row.id,row.revision)]);
+   const result=await db.batch([bootstrap,revisionInsert(db,row,next,'prepare_delivery',key,actor,body,false),db.prepare(`INSERT INTO managed_catalog_deliveries(catalog_id,profile,revision,source_revision,state,digest,contracts_json,media_ids_json,title,created_at) SELECT ?,?,?,?,'candidate',?,?,?,?,? WHERE ${guard}`).bind(row.id,profile,next,body.sourceRevision,hash,JSON.stringify(contractsFor(profile)),JSON.stringify(refs),validated.title,stamp,row.id,row.revision),...mediaPins('legacy-v1',row.published_revision,baseRefs),...mediaPins(profile,next,refs),audit(db,actor,row.id,'prepare_delivery',{revision:next,sourceRevision:body.sourceRevision,profile:profile,digest:hash},row.revision),db.prepare('UPDATE managed_catalog SET revision=?,updated_at=?,updated_by=? WHERE id=? AND revision=?').bind(next,stamp,actor,row.id,row.revision)]);
    if(!result.at(-1).meta.changes)throw new CommunityError(409,'Catalog changed while preparing the release.','CATALOG_CONFLICT');
   } catch(error) {await env.DECK_ASSETS.delete(key);throw error;}
  } else if(['activate','rollback','withdraw'].includes(body.operation)) {
-  const target=body.operation==='withdraw'?null:await db.prepare('SELECT d.*,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile=? AND d.revision=?').bind(row.id,PRACTICE_PROFILE,body.deliveryRevision).first();
+  const target=body.operation==='withdraw'?null:await db.prepare('SELECT d.*,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile=? AND d.revision=?').bind(row.id,profile,body.deliveryRevision).first();
   if(body.operation!=='withdraw' && (!target || (body.operation==='rollback' && !target.activated_at)))throw new CommunityError(400,'Choose an existing reviewed candidate or previously activated rollback revision.');
-  if(target && body.operation === 'activate') { const latest=await db.prepare("SELECT r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile='practice-v1' AND d.activated_at IS NOT NULL ORDER BY d.revision DESC LIMIT 1").bind(row.id).first(); if(latest)requireStableDeliveryIDs(await documentFor(env,latest.content_key),await documentFor(env,target.content_key)); }
-  if(target) {const doc=await documentFor(env,target.content_key);validateCatalogContent(row.kind,doc,row.id,{publish:true,deliveryProfile:PRACTICE_PROFILE});await checkMedia(db,row.id,doc);if(await digest(JSON.stringify(doc))!==target.digest)throw new CommunityError(409,'The immutable release digest changed.');}
+  if(target && body.operation === 'activate')await requireApprovedHistory(env,row.id,profile,await documentFor(env,target.content_key));
+  if(target) {const doc=await documentFor(env,target.content_key);validateCatalogContent(row.kind,doc,row.id,{publish:true,deliveryProfile:profile});await checkMedia(db,row.id,doc);if(await digest(JSON.stringify(doc))!==target.digest)throw new CommunityError(409,'The immutable release digest changed.');}
   const prior=(await db.prepare('SELECT media_ids_json FROM managed_catalog_deliveries WHERE catalog_id=? AND activated_at IS NOT NULL').bind(row.id).all()).results;
   const references=[...new Set([...baseRefs,...prior.flatMap(x=>JSON.parse(x.media_ids_json)),...(target?JSON.parse(target.media_ids_json):[])])];
-  const statements=[bootstrap,revisionInsert(db,row,next,body.operation+'_delivery',target?.content_key ?? baseSnapshot.content_key,actor,body,false),audit(db,actor,row.id,body.operation+'_delivery',{deliveryRevision:target?.revision ?? null,profile:PRACTICE_PROFILE},row.revision),advanceState(db,row,true),db.prepare(`UPDATE managed_catalog_deliveries SET state='retained' WHERE catalog_id=? AND profile=? AND state='active' AND ${guard}`).bind(row.id,PRACTICE_PROFILE,row.id,row.revision)];
-  if(target)statements.push(db.prepare(`UPDATE managed_catalog_deliveries SET state='active',activated_at=COALESCE(activated_at,?) WHERE catalog_id=? AND profile=? AND revision=? AND ${guard}`).bind(stamp,row.id,PRACTICE_PROFILE,target.revision,row.id,row.revision));
+  const statements=[bootstrap,revisionInsert(db,row,next,body.operation+'_delivery',target?.content_key ?? baseSnapshot.content_key,actor,body,false),audit(db,actor,row.id,body.operation+'_delivery',{deliveryRevision:target?.revision ?? null,profile:profile},row.revision),advanceState(db,row,true),db.prepare(`UPDATE managed_catalog_deliveries SET state='retained' WHERE catalog_id=? AND profile=? AND state='active' AND ${guard}`).bind(row.id,profile,row.id,row.revision)];
+  if(target)statements.push(db.prepare(`UPDATE managed_catalog_deliveries SET state='active',activated_at=COALESCE(activated_at,?) WHERE catalog_id=? AND profile=? AND revision=? AND ${guard}`).bind(stamp,row.id,profile,target.revision,row.id,row.revision));
   for(const id of references)statements.push(db.prepare(`INSERT OR IGNORE INTO managed_catalog_public_media(catalog_id,media_id) SELECT ?,? WHERE ${guard}`).bind(row.id,id,row.id,row.revision));
   statements.push(db.prepare('UPDATE managed_catalog SET revision=?,updated_at=?,updated_by=? WHERE id=? AND revision=?').bind(next,stamp,actor,row.id,row.revision));
   const result=await db.batch(statements);if(!result.at(-1).meta.changes)throw new CommunityError(409,'Catalog changed during delivery activation.','CATALOG_CONFLICT');
  } else throw new CommunityError(400,'Choose prepare, activate, rollback or withdraw.');
  return reply({item:await itemFor(env,await current(db,row.id))});
 }
-async function practiceManifest(env) {
+async function practiceManifest(env,profile) {
  const db=env.COMMUNITY_DB;
  const results=await db.batch([db.prepare("SELECT id,kind,published_title,published_revision,published_at FROM managed_catalog WHERE status='published' AND published_key IS NOT NULL ORDER BY sort_order,id"),db.prepare('SELECT * FROM managed_catalog_deliveries WHERE state=\'active\''),db.prepare('SELECT m.*,p.catalog_id AS public_catalog_id FROM managed_catalog_media m LEFT JOIN managed_catalog_public_media p ON p.media_id=m.id'),db.prepare('SELECT revision,initialized FROM managed_catalog_state WHERE id=1')]);
  const [rows,deliveries,media,state]=results.map(x=>x.results);
  const items=rows.map(row=>{
-  const release=deliveries.find(x=>x.catalog_id===row.id&&x.profile===PRACTICE_PROFILE),legacy=deliveries.find(x=>x.catalog_id===row.id&&x.profile==='legacy-v1'),selected=release??legacy;
-  return {id:row.id,kind:row.kind,title:release?.title??row.published_title,revision:release?.revision??row.published_revision,updatedAt:release?.activated_at??row.published_at,deliveryProfile:release?PRACTICE_PROFILE:'legacy-v1',requiredContracts:release?JSON.parse(release.contracts_json):[],contentDigest:release?.digest??null,contentURL:`https://api.learnalertapp.com/v1/catalog/${encodeURIComponent(row.id)}?profile=${release?PRACTICE_PROFILE:'legacy-v1'}&revision=${release?.revision??row.published_revision}`,assets:media.filter(x=>selected?JSON.parse(selected.media_ids_json).includes(x.id):x.public_catalog_id===row.id).map(x=>({id:x.id,reference:`catalog:${x.id}`,contentType:x.content_type,url:`https://api.learnalertapp.com/v1/catalog/media/${x.id}`}))};
+  const release=deliveries.find(x=>x.catalog_id===row.id&&x.profile===profile) ?? (profile===CAFE_PROFILE?deliveries.find(x=>x.catalog_id===row.id&&x.profile===PRACTICE_PROFILE):null),legacy=deliveries.find(x=>x.catalog_id===row.id&&x.profile==='legacy-v1'),selected=release??legacy;
+  return {id:row.id,kind:row.kind,title:release?.title??row.published_title,revision:release?.revision??row.published_revision,updatedAt:release?.activated_at??row.published_at,deliveryProfile:release?release.profile:'legacy-v1',requiredContracts:release?JSON.parse(release.contracts_json):[],contentDigest:release?.digest??null,contentURL:`https://api.learnalertapp.com/v1/catalog/${encodeURIComponent(row.id)}?profile=${release?release.profile:'legacy-v1'}&revision=${release?.revision??row.published_revision}`,assets:media.filter(x=>selected?JSON.parse(selected.media_ids_json).includes(x.id):x.public_catalog_id===row.id).map(x=>({id:x.id,reference:`catalog:${x.id}`,contentType:x.content_type,url:`https://api.learnalertapp.com/v1/catalog/media/${x.id}`}))};
  });
- const revision=await digest(JSON.stringify(items));return reply({schemaVersion:2,deliveryProfile:PRACTICE_PROFILE,revision,initialized:Boolean(state[0]?.initialized),items},200,true);
+ const revision=await digest(JSON.stringify({profile,items}));return reply({schemaVersion:2,deliveryProfile:profile,revision,initialized:Boolean(state[0]?.initialized),items},200,true);
 }
-async function practiceDocument(request,env,row) {
+async function practiceDocument(request,env,row,profile) {
  const revision=new URL(request.url).searchParams.get('revision');
  if(!revision || !Number.isSafeInteger(Number(revision)))throw new CommunityError(400,'Use an immutable delivery revision.');
- const target=await env.COMMUNITY_DB.prepare("SELECT d.*,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile=? AND d.revision=? AND d.activated_at IS NOT NULL").bind(row.id,PRACTICE_PROFILE,Number(revision)).first();
+ const target=await env.COMMUNITY_DB.prepare("SELECT d.*,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile=? AND d.revision=? AND d.activated_at IS NOT NULL").bind(row.id,profile,Number(revision)).first();
  if(!target)throw new CommunityError(404,'Compatible published delivery not found.');
  const bytes=JSON.stringify(await documentFor(env,target.content_key));if(await digest(bytes)!==target.digest)throw new CommunityError(503,'The delivery snapshot failed integrity validation.');
  const data=new TextEncoder().encode(bytes);let binary='';for(let i=0;i<data.length;i+=8192)binary+=String.fromCharCode(...data.subarray(i,i+8192));
- return reply({schemaVersion:2,id:row.id,kind:row.kind,revision:target.revision,deliveryProfile:PRACTICE_PROFILE,requiredContracts:JSON.parse(target.contracts_json),contentDigest:target.digest,payload:btoa(binary)},200,true);
+ return reply({schemaVersion:2,id:row.id,kind:row.kind,revision:target.revision,deliveryProfile:profile,requiredContracts:JSON.parse(target.contracts_json),contentDigest:target.digest,payload:btoa(binary)},200,true);
+}
+
+async function requireApprovedHistory(env,id,profile,candidate) {
+ const history=(await env.COMMUNITY_DB.prepare("SELECT d.profile,r.content_key FROM managed_catalog_deliveries d JOIN managed_catalog_revisions r ON r.catalog_id=d.catalog_id AND r.revision=d.revision WHERE d.catalog_id=? AND d.profile IN ('practice-v1','practice-v2') AND d.activated_at IS NOT NULL").bind(id).all()).results;
+ for(const release of history) {
+  const previous=await documentFor(env,release.content_key);
+  if(release.profile===profile || profile===CAFE_PROFILE)requireStableDeliveryIDs(previous,candidate);
+  else {
+   // An older representation omits v2-only lessons, but shared credited senses
+   // still cannot drift across profiles.
+   const learning={};for(const key of ['vocabulary','concepts'])learning[key]=Object.fromEntries(Object.entries(previous.learning?.[key] ?? {}).filter(([id])=>Object.hasOwn(candidate.learning?.[key] ?? {},id)));
+   requireStableLearningSemantics({learning},candidate);
+  }
+ }
 }
