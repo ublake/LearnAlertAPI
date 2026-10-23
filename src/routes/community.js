@@ -1,5 +1,6 @@
 import { ensureCommunityUser } from '../lib/communityHandles.js';
 import { avatarResponse, creatorStats, profileCreatedAt, pageParameters, publicDeckSQL, validLikeSQL, reactionColumnsSQL } from '../lib/communityCreators.js';
+import { mediaCountColumnsSQL } from '../lib/communityMedia.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity, checkAccountRestriction, accountRestriction, checkViewerAccess, restrictedSQL } from '../lib/communityAuth.js';
@@ -29,7 +30,8 @@ async function ownerProfile(db, row, restriction = null) {
 function deckResponse(row, detail = false, owner = false) {
   return { id: row.id, authorID: row.author_id, name: row.name, description: row.description, authorHandle: row.publisher_handle || row.handle,
     authorAvatar: avatarResponse(row), categoryTag: row.category_tag, colorHex: row.color_hex, deckType: row.deck_type,
-    cardCount: row.card_count, downloadCount: row.download_count, publishedAt: row.published_at,
+    cardCount: row.card_count, imageCount: row.image_count ?? 0, audioCount: row.audio_count ?? 0,
+    downloadCount: row.download_count, publishedAt: row.published_at,
     likeCount: row.like_count ?? 0, viewerHasLiked: Boolean(row.viewer_has_liked),
     ...(row.review_status ? { reviewStatus: row.review_status } : {}),
     reviewMessage: row.review_message ?? null, submittedAt: row.submitted_at ?? null,
@@ -123,7 +125,7 @@ async function handle(request, env) {
     await checkViewerAccess(db,viewer,author.id);
     const {limit,offset} = pageParameters(url);
     const [page,count] = await db.batch([
-      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL}
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL}
         FROM community_decks d JOIN community_users u ON u.id=d.owner_id
         WHERE d.owner_id=? AND ${publicDeckSQL} ORDER BY d.published_at DESC,d.id DESC LIMIT ? OFFSET ?`)
         .bind(viewer?.id || '',author.id,limit+1,offset),
@@ -189,11 +191,11 @@ async function handle(request, env) {
   if (path === '/v1/community/account/decks' && method === 'GET') {
     const user = await communityUser(request, env,true,true);
     const offset = Math.max(0, Math.min(100000, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
-    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,u.public_id AS author_id,${reactionColumnsSQL},d.updated_at AS sort_at
+    const { results } = await db.prepare(`SELECT d.id AS id,d.name,d.description,d.category_tag,d.color_hex,d.deck_type,d.card_count,d.download_count,d.published_at,d.review_status,d.review_message,d.submitted_at,d.status,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,u.avatar_json,d.admin_hidden,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL},d.updated_at AS sort_at
       FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.owner_id=? AND d.status!='deleted' AND (d.status='published' OR d.review_status IN ('pending','rejected') OR d.admin_action IS NOT NULL)
       UNION ALL
-      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,u.public_id,0,0,n.admin_updated_at
+      SELECT n.deck_id,n.name,'','General','#5B70E0','Mixed',n.card_count,0,NULL,NULL,NULL,NULL,'deleted',n.admin_note,'removed',n.admin_updated_at,u.handle,u.avatar_json,0,u.public_id,0,0,0,0,n.admin_updated_at
       FROM community_deck_notices n JOIN community_users u ON u.id=n.owner_id WHERE n.owner_id=?
       ORDER BY sort_at DESC,id DESC LIMIT 51 OFFSET ?`).bind(user.id,user.id,user.id,offset).all();
     return json({ decks: results.slice(0,50).map(row => deckResponse(row,false,true)), nextOffset: results.length>50 ? offset+50 : null });
@@ -306,7 +308,7 @@ async function handle(request, env) {
       AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
     const parameters = [viewer?.id||'',viewer?.id||'',category, category, search, pattern, pattern, pattern];
     const [page, count] = await db.batch([
-      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
+      db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
         .bind(viewer?.id||'',...parameters, limit + 1, offset),
       db.prepare(`SELECT COUNT(*) AS total ${filter}`).bind(...parameters)
     ]);
@@ -402,7 +404,7 @@ async function handle(request, env) {
   const previewMatch = path.match(new RegExp(`^/v1/community/decks/(${uuidPattern})/preview$`));
   if (previewMatch && method === 'GET') {
     const viewer = await communityUser(request,env,false);
-    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} FROM community_decks d
+    const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL} FROM community_decks d
       JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(viewer?.id||'',previewMatch[1]).first();
     if (!row) throw new CommunityError(404, 'Deck not found.');
     await checkViewerAccess(db,viewer,row.owner_id);
@@ -416,7 +418,7 @@ async function handle(request, env) {
     const id = deckMatch[1];
     if (method === 'GET') {
       const viewer = await communityUser(request,env,false);
-      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL} FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(viewer?.id||'',id).first();
+      const row = await db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL} FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=? AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0`).bind(viewer?.id||'',id).first();
       if (!row) throw new CommunityError(404, 'Deck not found.');
       await checkViewerAccess(db,viewer,row.owner_id);
       await db.prepare("UPDATE community_decks SET download_count=download_count+1 WHERE id=? AND status='published' AND review_status='approved' AND admin_hidden=0").bind(id).run();
