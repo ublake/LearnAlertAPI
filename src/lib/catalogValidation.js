@@ -118,6 +118,14 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
   const title = content.title ?? content.name;
   string(title, 'content.title', true);
   color(content.colorHex, 'content.colorHex');
+  // Drafts retain incomplete content, but an authored scheduling weight must
+  // always be a supported whole number. Missing weights keep the client default.
+  if (kind === 'course' && Array.isArray(content.units)) content.units.forEach((unit, u) => {
+    if (!Array.isArray(unit?.lessons)) return;
+    unit.lessons.forEach((lesson, l) => {
+      if (lesson && Object.hasOwn(lesson, 'importance') && (!Number.isSafeInteger(lesson.importance) || lesson.importance < 1 || lesson.importance > 10)) fail(`content.units[${u}].lessons[${l}].importance`, 'use a whole number from 1 to 10.');
+    });
+  });
   if (!publish) return { content, title, summary: summarize(kind, content) };
   if (kind === 'course') {
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');

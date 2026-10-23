@@ -51,6 +51,13 @@ Stable course/card identifiers preserve course SRS and local review history;
 pending course alerts refresh their content without creating a new schedule.
 Older app versions continue using their bundled curriculum until updated.
 
+Language topic decks may set `importance` on their lesson object: a whole number
+from 1 to 10, with 5 as the default when omitted. Both draft saves and publishing
+reject invalid supplied weights. The current app uses this relative frequency
+within its eligible level, keeping topic/card identities and mastery intact.
+Weights do not unlock future levels. The compact topic-deck Fields editor
+exposes the value, and import/export/legacy simplification retain it.
+
 ## Storage and API
 
 Migration `community-migrations/0014_managed_catalog.sql` adds only managed
