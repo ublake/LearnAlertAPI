@@ -15,6 +15,7 @@ Access assertion to the API; do not copy tokens into scripts or the client bundl
 | --- | --- | --- | --- |
 | GET | `/v1/admin/catalog/speech/studio` | `/admin/api/catalog/speech/studio` | Protected visible browser controls |
 | GET | `/v1/admin/catalog/speech/status` | `/admin/api/catalog/speech/status` | Non-secret readiness and fixed profile |
+| GET | `/v1/admin/catalog/:id/speech/status` | `/admin/api/catalog/:id/speech/status` | Current profile for this catalog's language |
 | GET/POST | `/v1/admin/catalog/:id/speech/budgets` | `/admin/api/catalog/:id/speech/budgets` | List/create immutable run allowances |
 | POST | `/v1/admin/catalog/:id/speech` | `/admin/api/catalog/:id/speech` | Generate or reuse one clip |
 | GET | `/v1/admin/catalog/:id/speech/:requestHash` | `/admin/api/catalog/:id/speech/:requestHash` | Inspect durable request outcome |
@@ -94,8 +95,8 @@ as conservative as the reviewed per-request exposure. Input limits, timeout and
 response-byte limits do not themselves prove a dollar ceiling. Verify provider
 controls separately; do not enable a run if its exposure cannot be bounded to the
 owner's approval. Actual charges remain `null` pending external reconciliation.
-Existing quotas additionally apply: 10/IP/hour, 50/IP/day and 200 global/day by
-default, shared with other AI endpoints. TTS cannot use AI_LIMITS_DISABLED to skip
+Existing quotas additionally apply: the deployed admin speech settings allow
+50/IP/hour, 50/IP/day and the shared 200 global/day. TTS cannot use AI_LIMITS_DISABLED to skip
 them. The studio proxy may share an IP quota, so these are not per-admin limits.
 
 ## Generate and reuse
@@ -112,7 +113,15 @@ Optional `cacheOnly: true` on the generation route permits only an exact existin
 recording; a missing cache returns 404 before budget/quota/provider work.
 Non-boolean values are rejected. This is for recovery/reuse, not a retry flag.
 
-Fixed defaults:
+Language profiles use the catalog's saved language, never an arbitrary client
+instruction. Spanish keeps its existing Madrid pronunciation profile and cached
+hashes. Korean uses clear, slow standard South Korean pronunciation without
+translation or extra words. Use complete pronounceable syllables for vowel
+sounds and the Korean letter names for isolated consonants. The studio refreshes
+the displayed profile when selecting a catalog; recovery resolves the original
+request's catalog profile even if another language is currently selected.
+
+Shared defaults (Spanish instructions shown below):
 
 - model: `gpt-4o-mini-tts`
 - voice: `cedar`
@@ -124,7 +133,10 @@ Fixed defaults:
 provider/model/voice fallback. Existing AI_MODEL, AI_PROVIDER and AI_BASE_URL do
 not change TTS. A model change requires a new reviewed allowance. `TTS_DISABLED=true`
 is an optional emergency stop for new provider calls; cached files remain usable.
-No new environment setting is necessary for this release's defaults.
+The deployed administrator speech allowance is 50 requests/IP/hour and 50/IP/day,
+using `TTS_REQUESTS_PER_IP_HOUR` and `TTS_REQUESTS_PER_IP_DAY`; ordinary AI endpoints
+retain their existing limits. The shared global quota and immutable run allowances
+still apply, including failed and uncertain requests.
 
 Success returns HTTP 201 for new audio or 200 for reuse, with a real `id`,
 `reference: "catalog:<UUID>"`, authenticated preview `url`, `contentType`,

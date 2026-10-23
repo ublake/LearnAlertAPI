@@ -2,6 +2,7 @@ import { CommunityError, readCommunityJSON, readLimitedBody, validateMedia } fro
 import { limitAIRequest } from './aiLimits.js';
 
 export const SPEECH_INSTRUCTIONS = 'speak in a enounced, madrid spain accented, slowly like your a teacher teaching pronoucation.';
+export const KOREAN_SPEECH_INSTRUCTIONS = 'Speak only the supplied Korean text in clear, natural standard South Korean pronunciation, slowly and carefully for a beginner learning Hangul. Do not translate, add an introduction, spell out Unicode characters, or add any other words. For an isolated consonant name, pronounce its Korean letter name exactly as supplied; for a syllable or word, pronounce its sound.';
 export const SPEECH_MODEL = 'gpt-4o-mini-tts';
 const endpoint = 'https://api.openai.com/v1/audio/speech';
 const encoder = new TextEncoder();
@@ -46,11 +47,14 @@ function modelFor(env) {
   if (typeof model !== 'string' || !/^[a-zA-Z0-9._-]{1,100}$/.test(model)) fail(503, 'TTS_CONFIGURATION_ERROR', 'The configured speech model is invalid.');
   return model;
 }
-export function speechBody(input, env) {
+export function speechBody(input, env, language = 'Spanish') {
   // A tighter course-clip bound than the provider maximum. The byte bound also
   // keeps unusually token-dense Unicode comfortably below the model input limit.
   if (typeof input !== 'string' || !input.trim() || input.length > 1000 || encoder.encode(input).byteLength > 1800) fail(400, 'TTS_INPUT_TOO_LONG', 'Use 1–1,000 characters and at most 1,800 UTF-8 bytes. Split longer passages into short clips.');
-  return { model: modelFor(env), voice: 'cedar', instructions: SPEECH_INSTRUCTIONS, response_format: 'mp3', speed: 1, input };
+  const korean = /^(korean|ko|ko-kr)$/i.test(language);
+  const instructions = korean ? KOREAN_SPEECH_INSTRUCTIONS : /^(spanish|es|es-es)$/i.test(language)
+    ? SPEECH_INSTRUCTIONS : `Speak only the supplied text in clear, natural ${language || 'original-language'} pronunciation, slowly for a beginner. Do not translate or add any other words.`;
+  return { model: modelFor(env), voice: 'cedar', instructions, response_format: 'mp3', speed: 1, input };
 }
 function canonical(value) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
@@ -67,7 +71,7 @@ function money(value) {
   return amount;
 }
 async function catalog(env, id, allowArchived = false) {
-  const row = await env.COMMUNITY_DB.prepare('SELECT id,status FROM managed_catalog WHERE id=?').bind(id).first();
+  const row = await env.COMMUNITY_DB.prepare('SELECT id,status,language FROM managed_catalog WHERE id=?').bind(id).first();
   if (!row) fail(404, 'TTS_CATALOG_NOT_FOUND', 'Catalog item not found.');
   if (row.status === 'archived' && !allowArchived) fail(409, 'TTS_CATALOG_ARCHIVED', 'Restore this catalog item before adding speech.');
   return row;
@@ -129,11 +133,12 @@ async function updateJob(db, hash, state, errorCode, providerRequestId = null) {
 // allowed administrator, same origin and JSON content type.
 export async function catalogSpeech(request, env, actor, catalogId, action, hash) {
   const db = env.COMMUNITY_DB;
+  const item = catalogId ? await catalog(env,catalogId,request.method === 'GET') : null;
+  const language = item?.language || 'Spanish';
   if (action === 'status') return { body: { configured: Boolean(env.OPENAI_API_KEY), disabled: env.TTS_DISABLED === 'true',
-    model: modelFor(env), voice: 'cedar', instructions: SPEECH_INSTRUCTIONS, responseFormat: 'mp3',
+    catalogId: catalogId || null, language, model: modelFor(env), voice: 'cedar', instructions: speechBody('profile',env,language).instructions, responseFormat: 'mp3',
     maxInputCharacters: 1000, maxInputBytes: 1800, requiresBudget: true, costNotice } };
   await storage(env);
-  await catalog(env,catalogId,request.method === 'GET');
   if (action === 'budgets') {
     if (request.method === 'GET') {
       const rows = (await db.prepare('SELECT * FROM catalog_speech_budgets WHERE catalog_id=? ORDER BY created_at DESC,id').bind(catalogId).all()).results;
@@ -166,7 +171,7 @@ export async function catalogSpeech(request, env, actor, catalogId, action, hash
   const body = await readCommunityJSON(request,false,8192);
   fields(body,['input','budgetId','cacheOnly']);
   if (body.cacheOnly !== undefined && typeof body.cacheOnly !== 'boolean') fail(400,'TTS_INVALID_REQUEST','cacheOnly must be a boolean.');
-  const speech = speechBody(body.input,env), requestHash = await speechHash(speech);
+  const speech = speechBody(body.input,env,language), requestHash = await speechHash(speech);
   const previous = await jobFor(db,requestHash);
   if (previous) return materialize(env,catalogId,previous,actor,true);
   if (body.cacheOnly === true) fail(404,'TTS_CACHE_MISS','No completed recording is cached for this exact profile and text. Recovery never generates audio.');
@@ -177,7 +182,9 @@ export async function catalogSpeech(request, env, actor, catalogId, action, hash
   if (!budget) fail(409,'TTS_BUDGET_REQUIRED','No speech allowance exists for this catalog item and budget ID.');
   if (budget.model !== speech.model) fail(409,'TTS_MODEL_CHANGED','The configured model differs from this budget. Review pricing and create a new approved budget; no model substitution was made.');
   // Do not allow the development opt-out to bypass production TTS rate limits.
-  const limited = await limitAIRequest(request,{...env,AI_LIMITS_DISABLED:'false'},crypto.randomUUID());
+  const limited = await limitAIRequest(request,{...env,AI_LIMITS_DISABLED:'false',
+    AI_REQUESTS_PER_IP_HOUR:env.TTS_REQUESTS_PER_IP_HOUR || env.AI_REQUESTS_PER_IP_HOUR,
+    AI_REQUESTS_PER_IP_DAY:env.TTS_REQUESTS_PER_IP_DAY || env.AI_REQUESTS_PER_IP_DAY},crypto.randomUUID());
   if (limited) return { status: limited.status, body: await limited.json(), retryAfter: limited.headers.get('Retry-After') };
   const stamp = now(), attempt = crypto.randomUUID();
   // One atomic D1 statement serializes duplicate/hash, global single-flight,

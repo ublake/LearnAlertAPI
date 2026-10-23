@@ -68,8 +68,8 @@ function canonical(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 }
-async function hashRequest(input) {
-  const body = { model: profile.model, voice: profile.voice, instructions: profile.instructions, response_format: profile.responseFormat, speed: 1, input };
+async function hashRequest(input, selectedProfile = profile) {
+  const body = { model: selectedProfile.model, voice: selectedProfile.voice, instructions: selectedProfile.instructions, response_format: selectedProfile.responseFormat, speed: 1, input };
   const value = JSON.stringify(canonical({ provider:'OpenAI', endpoint:'https://api.openai.com/v1/audio/speech', body }));
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), byte => byte.toString(16).padStart(2,'0')).join('');
 }
@@ -98,6 +98,9 @@ async function run(action) {
 }
 el('catalog').addEventListener('change', () => run(async () => {
   el('result').hidden = true;
+  profile = await request(pathFor(currentCatalog()) + '/status');
+  el('profile').textContent = JSON.stringify(profile, null, 2);
+  el('input').placeholder = 'Enter the exact ' + profile.language + ' text to speak.';
   await loadBudgets();
   say('Catalog selected. Generation only happens when you click Generate MP3.');
 }));
@@ -141,7 +144,9 @@ el('check-status').addEventListener('click', () => run(async () => {
   el('recover-media').hidden = result.state !== 'ready' || Boolean(result.media);
 }));
 el('recover-media').addEventListener('click', () => run(async () => {
-  if (!pending || profile.model !== pending.model || await hashRequest(pending.input) !== pending.hash) throw new Error('The speech profile changed. Stop and review this saved request.');
+  if (!pending) throw new Error('No saved request to recover.');
+  const savedProfile = await request(pathFor(pending.catalogId) + '/status');
+  if (savedProfile.model !== pending.model || await hashRequest(pending.input, savedProfile) !== pending.hash) throw new Error('The speech profile changed. Stop and review this saved request.');
   const status = await request(pathFor(pending.catalogId) + '/' + pending.hash);
   if (status.state !== 'ready') throw new Error('Only a completed cached recording can be recovered.');
   const result = await request(pathFor(pending.catalogId), {method:'POST',body:JSON.stringify({input:pending.input,budgetId:pending.budgetId,cacheOnly:true})});

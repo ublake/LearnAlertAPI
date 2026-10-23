@@ -150,11 +150,11 @@ export async function adminCatalog(request, env) {
     const upload = path.match(/^([^/]+)\/media$/);
     if (!['GET','HEAD'].includes(method) && (request.headers.get('Origin') !== 'https://learnalertapp.com' || (!upload && request.headers.get('Content-Type')?.split(';')[0] !== 'application/json'))) throw new CommunityError(403, 'Invalid admin request origin.');
     if (path === 'speech/studio' && method === 'GET') return speechStudio();
-    const speech = path.match(/^([^/]+)\/speech(?:\/(budgets|[a-f0-9]{64}))?$/);
+    const speech = path.match(/^([^/]+)\/speech(?:\/(status|budgets|[a-f0-9]{64}))?$/);
     if ((path === 'speech/status' && method === 'GET') || (speech && catalogIDPattern.test(speech[1]) &&
         ((!speech[2] && method === 'POST') || (speech[2] === 'budgets' && ['GET','POST'].includes(method)) || (speech[2] && speech[2] !== 'budgets' && method === 'GET')))) {
       try {
-        const result = await catalogSpeech(request,env,actor,speech?.[1],path === 'speech/status' ? 'status' : speech[2] === 'budgets' ? 'budgets' : speech[2] ? 'job' : 'generate',speech?.[2]);
+        const result = await catalogSpeech(request,env,actor,speech?.[1],path === 'speech/status' || speech?.[2] === 'status' ? 'status' : speech[2] === 'budgets' ? 'budgets' : speech[2] ? 'job' : 'generate',speech?.[2]);
         const response = reply(result.body,result.status || 200);
         if (result.retryAfter) response.headers.set('Retry-After',result.retryAfter);
         return response;

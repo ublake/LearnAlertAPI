@@ -41,6 +41,9 @@
 		"AI_REQUESTS_PER_IP_HOUR": "10",
 		"AI_REQUESTS_PER_IP_DAY": "50",
 		"AI_REQUESTS_PER_DAY": "200",
+		// Authenticated speech runs also have immutable per-run count/cost allowances.
+		"TTS_REQUESTS_PER_IP_HOUR": "50",
+		"TTS_REQUESTS_PER_IP_DAY": "50",
 		// The switcher: "cheaper_inference" or "openai".
 		"AI_PROVIDER": "cheaper_inference",
 		// Set to "true" to let a request pick the provider via X-AI-Provider.
