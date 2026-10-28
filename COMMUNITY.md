@@ -45,7 +45,7 @@ All paths start with `/v1/community`.
 | GET | `/account/decks` | Bearer session; own published, pending, and rejected decks |
 | GET | `/account/likes?limit=20&offset=0` | Bearer session; own received-heart identities and chart counts |
 | DELETE | `/account` | Bearer session; removes account and public content |
-| GET | `/decks?q=&category=&offset=&limit=` | Public approved summaries and `nextOffset` |
+| GET | `/decks?q=&category=&language=&sort=&offset=&limit=` | Public approved summaries, `nextOffset`, and `totalCount` |
 | GET | `/profiles/:authorID?limit=20&offset=0` | Public creator identity/profile statistics and published decks |
 | POST | `/decks/drafts` | Bearer session; returns deck ID |
 | POST | `/decks/:id/media` | Owner; raw binary body and allowed Content-Type |
@@ -56,6 +56,22 @@ All paths start with `/v1/community`.
 | DELETE | `/decks/:id` | Owner; removes public copy |
 | POST | `/decks/:id/reports` | Signed-in user; JSON `reason` |
 | PUT/DELETE | `/decks/:id/like` | Signed-in non-owner; idempotently heart/unheart an available deck |
+
+Shared-deck discovery accepts `sort=popular` (downloads, descending), `likes`
+(valid visible hearts, descending), `recent` (newest publication first), or
+`oldest` (earliest publication first). `downloads` and `newest` are aliases.
+An omitted or unknown sort keeps the existing recent-first default. Every order
+uses publication time and deck ID as deterministic tie-breakers.
+
+The optional `language` filter supports `en`, `es`, `fr`, `de`, `it`, `pt`, `ko`,
+`ja`, `zh`, and `ar`. Empty means all languages; unsupported values return 400.
+Without an authored language column on shared decks, this matches language names
+and native aliases in the deck's title, description, and category. Latin names
+use word boundaries, while native East Asian and Arabic names can appear without
+spaces. It does not inspect all card contents or automatically identify unlabeled
+decks; a multilingual description can match more than one language. This filter
+combines with existing category/search and visibility/blocking rules before both
+pagination and `totalCount`, so the results are not limited to the loaded page.
 
 Submission succeeds with HTTP 202 and `{ id, success: true, reviewStatus: "pending", submittedAt, message: "Review can take up to 3 days." }`. Owner deck summaries include optional `reviewStatus` (`pending`, `approved`, or `rejected`), `reviewMessage` (rejection reason or null), and `submittedAt` (epoch seconds or null). Resubmission clears an old rejection reason. Pending/rejected cards and referenced media remain private and are retained until removed by the owner/admin.
 

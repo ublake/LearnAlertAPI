@@ -1,6 +1,7 @@
 import { ensureCommunityUser } from '../lib/communityHandles.js';
 import { avatarResponse, creatorStats, profileCreatedAt, pageParameters, publicDeckSQL, validLikeSQL, reactionColumnsSQL } from '../lib/communityCreators.js';
 import { mediaCountColumnsSQL } from '../lib/communityMedia.js';
+import { communityDiscoveryOrder, communityLanguageFilter } from '../lib/communityDiscovery.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity, checkAccountRestriction, accountRestriction, checkViewerAccess, restrictedSQL } from '../lib/communityAuth.js';
@@ -295,18 +296,17 @@ async function handle(request, env) {
     const offset = Math.min(100000, Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0));
     const search = (url.searchParams.get('q') || '').trim().slice(0, 120);
     const category = (url.searchParams.get('category') || '').trim().slice(0, 60);
-    // Only fixed sort clauses enter SQL; older clients retain the recent-first default.
-    const order = url.searchParams.get('sort') === 'popular'
-      ? 'd.download_count DESC, d.published_at DESC, d.id DESC'
-      : 'd.published_at DESC, d.id DESC';
+    // Sorting and language filtering happen before both pagination and its count.
+    const order = communityDiscoveryOrder(url.searchParams.get('sort'));
+    const language = communityLanguageFilter(url.searchParams.get('language'));
     // Escape LIKE wildcards so a user's search is interpreted literally.
     const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
     const filter = `FROM community_decks d JOIN community_users u ON u.id=d.owner_id
       WHERE d.status='published' AND d.review_status='approved' AND d.admin_hidden=0
       AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=d.owner_id AND ${restrictedSQL})
       AND NOT EXISTS(SELECT 1 FROM community_blocks b WHERE (b.viewer_id=? AND b.blocked_account_id=d.owner_id) OR (b.viewer_id=d.owner_id AND b.blocked_account_id=?)) AND (?='' OR d.category_tag=? COLLATE NOCASE)
-      AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')`;
-    const parameters = [viewer?.id||'',viewer?.id||'',category, category, search, pattern, pattern, pattern];
+      AND (?='' OR d.name LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\')${language.sql}`;
+    const parameters = [viewer?.id||'',viewer?.id||'',category, category, search, pattern, pattern, pattern,...language.parameters];
     const [page, count] = await db.batch([
       db.prepare(`SELECT d.*,u.handle,u.avatar_json,u.public_id AS author_id,${reactionColumnsSQL},${mediaCountColumnsSQL} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`)
         .bind(viewer?.id||'',...parameters, limit + 1, offset),
