@@ -1,5 +1,27 @@
 # LearnAlert admin
 
+## Current deck-based studio
+
+The main workspaces are Shared decks, Language decks, and Moderation. Language
+content is authored as language → optional display group → independent topic
+deck → ordinary cards. Existing `units`/`lessons` JSON keys remain compatibility
+storage; they do not restore course progression, checkpoints, or importance.
+The app receives current language collections through the existing catalog API.
+
+Current language collections support quiz, matching, fill-in-the-blank,
+vocabulary, reveal, and image cards, including image/audio-only fields where
+the card type supports them. Image cards use a required front image and optional
+back image. Incomplete drafts remain saveable; publication validates answerability
+and the existing attachment ownership/type checks still apply.
+
+Legacy courses and exam records remain stored for compatibility. Opening a legacy
+course in the studio is read-only until an administrator explicitly previews a
+conversion and saves it. Publishing a catalog update changes discovery content,
+not the learner's independently saved library copies or learning history.
+Admin deck rows expose `like_count` as total stored hearts; public counts can
+additionally filter blocked/restricted accounts. Access authentication, review
+approval, author notes, revision guards, and audit records remain in place.
+
 ## Production configuration
 
 Activated October 13, 2026:

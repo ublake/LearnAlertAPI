@@ -131,7 +131,8 @@ export async function admin(request, env) {
       const publicFilter = publicOnly ? `AND d.status='published' AND d.review_status='approved' AND d.admin_hidden=0
         AND NOT EXISTS(SELECT 1 FROM community_account_restrictions r WHERE r.account_id=d.owner_id AND ${restrictedSQL})` : '';
       list = await db.prepare(`SELECT d.id,d.name,d.description,d.category_tag,d.status,d.admin_hidden,d.card_count,d.download_count,d.created_at,d.updated_at,d.published_at,d.review_status,d.review_message,d.submitted_at,d.reviewed_at,d.revision,d.admin_created,d.admin_note,d.admin_action,d.admin_updated_at,u.handle,
-        (SELECT COUNT(*) FROM community_reports r WHERE r.deck_id=d.id AND r.resolved_at IS NULL) AS report_count
+        (SELECT COUNT(*) FROM community_reports r WHERE r.deck_id=d.id AND r.resolved_at IS NULL) AS report_count,
+        (SELECT COUNT(*) FROM community_likes l WHERE l.deck_id=d.id) AS like_count
         FROM community_decks d JOIN community_users u ON u.id=d.owner_id
         WHERE (?='' OR d.name LIKE ? ESCAPE '\\' OR u.handle LIKE ? ESCAPE '\\') ${publicFilter} ORDER BY d.created_at DESC,d.id LIMIT 51 OFFSET ?`).bind(q, pattern, pattern, offset).all();
     } else if (method === 'GET' && path === 'profiles') {

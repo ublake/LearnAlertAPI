@@ -7,6 +7,7 @@ export const CATALOG_JSON_MAXIMUM = 16 * 1024 * 1024;
 export const catalogIDPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const courseTypes = new Set(['multipleChoice','vocabulary','tapReveal','matching','fillBlank','listening','listeningWrite','images','hangulBuild','tokenPlacement','hangulTrace']);
 const deckTypes = new Set(['multiple_choice','vocabulary','tap_reveal','matching','fill_blank','images','anki']);
+const languageDeckTypes = new Set(['multipleChoice','multiple_choice','vocabulary','tapReveal','tap_reveal','matching','fillBlank','fill_blank','images']);
 const activityKinds = new Set(['teach','trace','buildBlock','placeTokens','listenChoose','situation','matchPairs']);
 const nodeTypes = new Set(['lesson','practice','checkpoint','cultural_tip']);
 function fail(path, message) { throw new CommunityError(400, `${path}: ${message}`, 'CATALOG_VALIDATION'); }
@@ -25,7 +26,7 @@ function identifiers(values, path, globallySeen) {
 }
 function color(value, path) { if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) fail(path, 'use a six-digit hex color.'); }
 function optionalStrings(value, fields, path) { for (const key of fields) if (value[key] !== undefined && value[key] !== null) string(value[key], `${path}.${key}`); }
-function fieldHasMedia(card, field) {
+function resolvedFieldMedia(card, field) {
   const media = card.fieldMedia?.[field];
   // Match CardFieldMedia's native-key precedence, including explicit empties,
   // then the same top-level Name overrides used by resolvedFieldMedia in-app.
@@ -38,7 +39,31 @@ function fieldHasMedia(card, field) {
     const optionImage = card.optionImageNames?.[Number(field.slice(7))];
     if (typeof optionImage === 'string' && optionImage.length) image = optionImage;
   }
-  return [image,audio].some(value => typeof value === 'string' && value.trim());
+  return { image, audio };
+}
+function hasValue(value) { return typeof value === 'string' && Boolean(value.trim()); }
+function fieldHasMedia(card, field) {
+  return Object.values(resolvedFieldMedia(card, field)).some(hasValue);
+}
+function validateLanguageDeckCard(card, path) {
+  if (card.cardType === 'images') {
+    if (!hasValue(resolvedFieldMedia(card, 'prompt').image)) fail(`${path}.fieldMedia.prompt`, 'image cards need a front image.');
+    const fields = new Set(['prompt','answer',...Object.keys(card.fieldMedia || {})]);
+    if (card.question.trim() || card.correctAnswer.trim() || card.hint?.trim()
+        || (card.options?.length || 0) || (card.matchingLeftItems?.length || 0)
+        || (card.matchingRightItems?.length || 0) || (card.optionImageNames?.length || 0)
+        || (card.optionImageIDs?.length || 0) || hasValue(card.promptAudioID)
+        || [...fields].some(field => !['prompt','answer'].includes(field) || hasValue(resolvedFieldMedia(card, field).audio))) {
+      fail(path, 'image cards contain a front image, an optional back image, and no text, hints, audio, choices or pairs.');
+    }
+    return;
+  }
+  const flashcard = ['vocabulary','tapReveal','tap_reveal'].includes(card.cardType);
+  const typedBlank = ['fillBlank','fill_blank'].includes(card.cardType) && !(card.options?.length || 0);
+  if (flashcard || typedBlank) {
+    if (!card.question.trim() && !fieldHasMedia(card, 'prompt')) fail(`${path}.question`, 'add text, an image or audio for the prompt.');
+    if (!card.correctAnswer.trim() && !fieldHasMedia(card, 'answer')) fail(`${path}.correctAnswer`, 'add text, an image or audio for the answer.');
+  }
 }
 function normalizedAnswer(value) { return value.normalize('NFC').toLowerCase().replace(/[\p{White_Space}\p{P}]/gu, ''); }
 function validateAnswerability(card, path, course) {
@@ -68,11 +93,11 @@ function validateAnswerability(card, path, course) {
     if (!mediaChoices && new Set(options).size !== options.length) fail(`${path}.options`,'text answer choices must be distinct.');
   }
 }
-function validateCard(card, path, course, learning, modern = false) {
+function validateCard(card, path, course, learning, modern = false, languageDeck = false) {
   object(card, path); string(card.id, `${path}.id`, true);
   string(card.question, `${path}.question`); string(card.correctAnswer, `${path}.correctAnswer`);
   const types = course ? courseTypes : deckTypes;
-  if (!types.has(card.cardType)) fail(`${path}.cardType`, 'unsupported card type for the app.');
+  if (!types.has(card.cardType) && !(languageDeck && languageDeckTypes.has(card.cardType))) fail(`${path}.cardType`, 'unsupported card type for the app.');
   for (const field of ['options','matchingLeftItems','matchingRightItems','optionImageNames','optionImageIDs','acceptedAnswers']) if (card[field] != null) strings(card[field], `${path}.${field}`);
   optionalStrings(card, ['hint','promptImageName','answerImageName','promptImageID','answerImageID','promptAudioName','promptAudioID','grammarNote','speechText','conceptTag','explanation','readingPrompt','previousQuestion','sectionName'], path);
   if (card.correctOptionIndex != null && (!Number.isInteger(card.correctOptionIndex) || card.correctOptionIndex < 0 || card.correctOptionIndex >= (card.options?.length || 0))) fail(`${path}.correctOptionIndex`, 'choose an existing answer.');
@@ -96,7 +121,8 @@ function validateCard(card, path, course, learning, modern = false) {
     for (const field of ['surface','dictionaryForm','romanization','partOfSpeech','contextualMeaning']) string(vocab[field], `${path}.vocabularyItem.${field}`);
     optionalStrings(vocab, ['breakdownNote','exampleKorean','exampleEnglish','audioText'], `${path}.vocabularyItem`);
   }
-  validateAnswerability(card, path, course);
+  validateAnswerability(card, path, course && !languageDeck);
+  if (languageDeck) validateLanguageDeckCard(card, path);
   if (card.activity?.exercise != null) validatePracticeExercise(card, path, learning, modern);
   if (card.cardType === 'anki') {
     const anki = object(card.ankiContent, `${path}.ankiContent`);
@@ -130,13 +156,14 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
   if (kind === 'course') {
     for (const field of ['title','language','flagEmoji','levelTag','summary']) string(content[field], `content.${field}`, field === 'title' || field === 'language');
     numeric(content.estimatedHours, 'content.estimatedHours'); strings(content.outcomes, 'content.outcomes');
-    if (content.presentation === 'deck_collection') {
+    const languageDeck = content.presentation === 'deck_collection';
+    if (languageDeck) {
       if (content.learning || Object.keys(content.guides || {}).length || Object.keys(content.guidePresentation || {}).length) fail('content', 'language collections contain topic decks and cards only.');
       for (const unit of content.units || []) {
         if (unit.checkpointQuiz) fail('content.units', 'language collections do not use checkpoints.');
         for (const lesson of unit.lessons || []) for (const card of lesson.cards || []) {
-          if (card.activity || card.explanation || card.grammarNote || !['multipleChoice','matching','fillBlank','vocabulary','tapReveal'].includes(card.cardType)) fail('content.units', 'use regular quiz, matching, blank or flashcard cards without explanation metadata.');
-          if (card.cardType === 'fillBlank' && (card.options?.length || 0) && !/_{2,}|\{blank\}|\[blank\]/.test(card.question)) fail('content.units', 'choice blanks need a ___ in the prompt.');
+          if (card.activity || card.explanation || card.grammarNote || !languageDeckTypes.has(card.cardType)) fail('content.units', 'use regular quiz, matching, blank, flashcard or image cards without explanation metadata.');
+          if (['fillBlank','fill_blank'].includes(card.cardType) && (card.options?.length || 0) && !/_{2,}|\{blank\}|\[blank\]/.test(card.question)) fail('content.units', 'choice blanks need a ___ in the prompt.');
         }
       }
     }
@@ -156,7 +183,7 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
         if (!nodeTypes.has(lesson.nodeType)) fail(`${lp}.nodeType`, 'unsupported lesson type.');
         optionalStrings(lesson, ['tipNote'], lp); const cards = array(lesson.cards, `${lp}.cards`);
         if (!cards.length) fail(`${lp}.cards`, 'a published lesson needs at least one card.');
-        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning, deliveryProfile));
+        identifiers(cards, `${lp}.cards`, cardIDs); cards.forEach((card,c) => validateCard(card, `${lp}.cards[${c}]`, true, learning, deliveryProfile, languageDeck));
       });
       if (unit.checkpointQuiz != null) {
         const checkpoint = object(unit.checkpointQuiz, `${path}.checkpointQuiz`); string(checkpoint.id, `${path}.checkpointQuiz.id`, true);
