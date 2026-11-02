@@ -77,6 +77,10 @@ test('front/back images preserve review privacy, ownership, atomic guards, downl
     function request(path, method = 'GET', body, token = null, contentType = 'application/json') {
       const headers = {};
       if (token) headers.Authorization = `Bearer ${token}`;
+      if (contentType === 'application/json' && body && typeof body === 'object' && !Array.isArray(body) && ((method === 'POST' && path === 'decks/drafts') || (['PUT', 'PATCH'].includes(method) && /^decks\/[a-f0-9-]{36}$/i.test(path)))) {
+        body = { acceptedRules: true, description: 'Original study content for this fixture.', ...body };
+      }
+      if (method === 'POST' && /^decks\/[a-f0-9-]{36}\/media$/i.test(path)) headers['X-Community-Rules-Accepted'] = 'true';
       if (body !== undefined) headers['Content-Type'] = contentType;
       return mf.dispatchFetch(`https://community.test/v1/community/${path}`, { method, headers, body: body === undefined ? undefined : contentType === 'application/json' ? JSON.stringify(body) : body });
     }

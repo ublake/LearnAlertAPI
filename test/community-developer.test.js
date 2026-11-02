@@ -39,7 +39,14 @@ test('developer capabilities are private, cannot be self-granted, and enforce th
       await db.prepare('INSERT INTO community_users(id,handle,created_at,profile_completed,is_developer) VALUES(?,?,1,1,?)').bind(id, `@${id}`,role).run();
       await db.prepare('INSERT INTO community_sessions VALUES(?,?,?)').bind(await sha256(token),id,Math.floor(Date.now()/1000)+3600).run();
     }
-    const request = (path, method='GET', body, token=regular, type='application/json') => mf.dispatchFetch(`https://community.test/v1/community/${path}`, {method, headers: {...(token ? {Authorization:`Bearer ${token}`} : {}), 'Content-Type':type}, body: body === undefined ? undefined : type === 'application/json' ? JSON.stringify(body) : body});
+    const request = (path, method='GET', body, token=regular, type='application/json') => {
+      if (type === 'application/json' && body && typeof body === 'object' && !Array.isArray(body) && ((method === 'POST' && path === 'decks/drafts') || (['PUT', 'PATCH'].includes(method) && /^decks\/[a-f0-9-]{36}$/i.test(path)))) {
+        body = { acceptedRules: true, description: 'Original study content for this fixture.', ...body };
+      }
+      const headers = {...(token ? {Authorization:`Bearer ${token}`} : {}), 'Content-Type':type};
+      if (method === 'POST' && /^decks\/[a-f0-9-]{36}\/media$/i.test(path)) headers['X-Community-Rules-Accepted'] = 'true';
+      return mf.dispatchFetch(`https://community.test/v1/community/${path}`, {method, headers, body: body === undefined ? undefined : type === 'application/json' ? JSON.stringify(body) : body});
+    };
     const owner = await (await request('account','GET',undefined,developer)).json();
     assert.equal(owner.isDeveloper,true); assert.equal(owner.allowAnkiUploads,false);
     const publicProfile = await (await request(`profiles/${owner.authorID}`,'GET',undefined,null)).json();

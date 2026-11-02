@@ -1,5 +1,19 @@
 # LearnAlert admin
 
+## Public sharing requirements
+
+The app's `POST /v1/community/decks/drafts` and owner
+`PUT`/`PATCH /v1/community/decks/:id` require JSON `acceptedRules: true`
+and a description with 1–2000 UTF-16 characters after trimming whitespace.
+Public `POST /v1/community/decks/:id/media` also requires the exact header
+`X-Community-Rules-Accepted: true` before reading or storing the upload body.
+The acceptance flags are request validation, not stored consent/audit records.
+
+Admin drafting, editing, uploads and moderation keep their existing contracts,
+including incomplete private drafts. No migration or existing-content rewrite
+is needed. Older app clients missing the new flags receive a validation error
+and must use the updated sharing flow.
+
 ## Permanent shared-deck deletion and storage cleanup
 
 Apply migrations `0018_shared_deck_deletion.sql` and

@@ -2,7 +2,7 @@ const BASE_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key, X-Community-Rules-Accepted",
   "Cache-Control": "no-store"
 };
 

@@ -176,7 +176,14 @@ test('admin moderation hides all public entry points, survives owner edits, rest
     // spoof approval or use the trusted-admin direct-publication endpoint.
     const reviewToken = 'c'.repeat(64);
     await db.prepare('INSERT INTO community_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await sha256(reviewToken),'reporter',Math.floor(Date.now()/1000)+30*86400).run();
-    const app = (path,method='GET',body) => mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers: { Authorization: `Bearer ${reviewToken}`, 'Content-Type': body instanceof Uint8Array ? 'image/png' : 'application/json' }, body: body === undefined ? undefined : body instanceof Uint8Array ? body : JSON.stringify(body) });
+    const app = (path,method='GET',body) => {
+      if (body && typeof body === 'object' && !Array.isArray(body) && !(body instanceof Uint8Array) && ((method === 'POST' && path === 'decks/drafts') || (['PUT', 'PATCH'].includes(method) && /^decks\/[a-f0-9-]{36}$/i.test(path)))) {
+        body = { acceptedRules: true, description: 'Original study content for this fixture.', ...body };
+      }
+      const headers = { Authorization: `Bearer ${reviewToken}`, 'Content-Type': body instanceof Uint8Array ? 'image/png' : 'application/json' };
+      if (method === 'POST' && /^decks\/[a-f0-9-]{36}\/media$/i.test(path)) headers['X-Community-Rules-Accepted'] = 'true';
+      return mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers, body: body === undefined ? undefined : body instanceof Uint8Array ? body : JSON.stringify(body) });
+    };
     const appDraft = (await (await app('decks/drafts','POST',{ name: 'Needs review', admin_created: 1, reviewStatus: 'approved' })).json()).id;
     assert.ok(appDraft);
     assert.equal((await (await call(`decks/${appDraft}`)).json()).deck.admin_created, 0);
@@ -254,7 +261,10 @@ test('author admin notes stay private, survive resubmission, and deleted notices
     await db.prepare("INSERT INTO community_decks(id,owner_id,name,category_tag,color_hex,deck_type,status,created_at,updated_at,cards_json,card_count) VALUES(?,'author','Original','General','#123456','Mixed','published',1,1,?,1)").bind(id,JSON.stringify(cards)).run();
     await db.prepare("INSERT INTO community_media(id,deck_id,object_key,content_type,byte_size,uploaded,attached,created_at) VALUES(?,?,'notice-image','image/png',3,1,1,1)").bind(media,id).run(); await bucket.put('notice-image',new Uint8Array([1,2,3]));
     const call=(path,method='GET',body,assertion=jwt)=>mf.dispatchFetch('https://api.example.test/v1/admin/'+path,{method,headers:{'Cf-Access-Jwt-Assertion':assertion,Origin:'https://learnalertapp.com','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
-    const app=(path,method='GET',body,bearer=session)=>mf.dispatchFetch('https://api.example.test/v1/community/'+path,{method,headers:{...(bearer?{Authorization:'Bearer '+bearer}:{}),'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+    const app=(path,method='GET',body,bearer=session)=>{
+      if(body&&typeof body==='object'&&!Array.isArray(body)&&['PUT','PATCH'].includes(method)&&/^decks\/[a-f0-9-]{36}$/i.test(path))body={acceptedRules:true,description:'Original study content for this fixture.',...body};
+      return mf.dispatchFetch('https://api.example.test/v1/community/'+path,{method,headers:{...(bearer?{Authorization:'Bearer '+bearer}:{}),'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+    };
     const row=async()=> (await (await app('account/decks')).json()).decks.find(d=>d.id===id);
     const current=async()=> (await (await call('decks/'+id)).json()).deck;
     let revision=(await current()).revision;

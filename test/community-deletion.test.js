@@ -104,7 +104,7 @@ test('a reserved upload finishing after deck deletion stays queued if its rollba
     const blocked=new Promise(resolve=>{release=resolve;});
     const storage={async put(name,bytes,options){key=name;entered();await blocked;await f.bucket.put(name,bytes,options);putFinished=true;},async delete(name){if(putFinished)throw new Error('rollback unavailable');await f.bucket.delete(name);}};
     const env={...f.env,DECK_ASSETS:storage};
-    const upload=community(new Request(`https://api.test/v1/community/decks/${id}/media`,{method:'POST',headers:{Authorization:`Bearer ${ownerToken}`,'Content-Type':'audio/wav'},body:new TextEncoder().encode('RIFF1234WAVEfmt test data')}),env,'upload-race');
+    const upload=community(new Request(`https://api.test/v1/community/decks/${id}/media`,{method:'POST',headers:{Authorization:`Bearer ${ownerToken}`,'Content-Type':'audio/wav','X-Community-Rules-Accepted':'true'},body:new TextEncoder().encode('RIFF1234WAVEfmt test data')}),env,'upload-race');
     await started;
     assert.equal((await f.request(`decks/${id}`,'DELETE',undefined,ownerToken,env)).status,200);
     release();
@@ -174,12 +174,12 @@ test('deleting drafts cannot reset the twenty-per-day creation budget',async()=>
   const f=await fixture();
   try {
     for(let index=0;index<20;index++) {
-      const response=await f.request('decks/drafts','POST',{name:`Deck ${index}`});
+      const response=await f.request('decks/drafts','POST',{name:`Deck ${index}`,description:'Original study content for this fixture.',acceptedRules:true});
       assert.equal(response.status,201,await response.clone().text());
       const {id}=await response.json();
       assert.equal((await f.request(`decks/${id}`,'DELETE')).status,200);
     }
-    assert.equal((await f.request('decks/drafts','POST',{name:'Over budget'})).status,429);
+    assert.equal((await f.request('decks/drafts','POST',{name:'Over budget',description:'Original study content for this fixture.',acceptedRules:true})).status,429);
     assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM community_decks').first()).n,0);
   } finally {await f.mf.dispose();}
 });

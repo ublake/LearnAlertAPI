@@ -53,6 +53,23 @@ function mediaID(value) {
   return value;
 }
 
+export function requireCommunityRulesAcceptance(accepted) {
+  if (accepted !== true) {
+    throw new CommunityError(400, 'Accept the sharing rules before uploading or submitting a deck.', 'COMMUNITY_RULES_REQUIRED');
+  }
+}
+
+/** Public app submissions have stricter requirements than private admin drafts. */
+export function validateCommunitySubmission(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new CommunityError(400, 'Invalid deck.');
+  requireCommunityRulesAcceptance(body.acceptedRules);
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  if (!description || description.length > 2000) {
+    throw new CommunityError(400, 'Add a description of 1–2000 characters before sharing.', 'COMMUNITY_DESCRIPTION_REQUIRED');
+  }
+  return { ...body, description };
+}
+
 export const ankiUploadMessage = 'Uploading decks imported from Anki are not supported yet';
 export function deckMetadata(body, developer = false) {
   if (!body || typeof body !== 'object') throw new CommunityError(400, 'Invalid deck.');

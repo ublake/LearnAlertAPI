@@ -7,7 +7,7 @@ import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
 import { communityUser, sha256, verifyAppleIdentity, checkAccountRestriction, accountRestriction, checkViewerAccess, restrictedSQL } from '../lib/communityAuth.js';
 import { appleConfigured, validateAppleCode, exchangeAppleCode, revokeAppleJob, deleteCommunityAccount, verifyAppleEvent } from '../lib/appleLifecycle.js';
-import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, MEDIA_TYPES, validateMedia, validateCommunityProfile } from '../lib/communityValidation.js';
+import { CommunityError, readCommunityJSON, readLimitedBody, deckMetadata, validateCommunityDeck, validateCommunitySubmission, requireCommunityRulesAcceptance, MEDIA_TYPES, validateMedia, validateCommunityProfile } from '../lib/communityValidation.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const uuidPattern = '[a-fA-F0-9-]{36}';
@@ -319,7 +319,7 @@ async function handle(request, env) {
 
   if (path === '/v1/community/decks/drafts' && method === 'POST') {
     const user = await communityUser(request, env);
-    const meta = deckMetadata(await readCommunityJSON(request), Boolean(user.is_developer && user.developer_anki_uploads));
+    const meta = deckMetadata(validateCommunitySubmission(await readCommunityJSON(request)), Boolean(user.is_developer && user.developer_anki_uploads));
     const id = crypto.randomUUID();
     const result = await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,created_at,updated_at,review_status)
       SELECT ?,?,?,?,?,?,?,?,?,NULL WHERE
@@ -335,6 +335,7 @@ async function handle(request, env) {
     requireStorage(env);
     const user = await communityUser(request, env);
     const deck = await ownedDeck(env, uploadMatch[1], user);
+    requireCommunityRulesAcceptance(request.headers.get('X-Community-Rules-Accepted') === 'true');
     const contentType = (request.headers.get('Content-Type') || '').split(';')[0].toLowerCase();
     const ankiUpload = contentType === 'application/octet-stream';
     if (ankiUpload && !(user.is_developer && user.developer_anki_uploads)) throw new CommunityError(403, 'Uploading decks imported from Anki are not supported yet');
@@ -438,7 +439,7 @@ async function handle(request, env) {
     const ownedPublication = await ownedDeck(env, id, user);
     if (method === 'PUT' || method === 'PATCH') {
       const developer = Boolean(user.is_developer && user.developer_anki_uploads);
-      const body = await readCommunityJSON(request, false, user.is_developer ? 16 * 1024 * 1024 : 1024 * 1024);
+      const body = validateCommunitySubmission(await readCommunityJSON(request, false, user.is_developer ? 16 * 1024 * 1024 : 1024 * 1024));
       // Creator name overrides need the developer role, independent of the Anki switch.
       const publisherHandle = body.publisherHandle;
       if (publisherHandle && !user.is_developer) throw new CommunityError(403, 'Custom publishing names require developer access.');

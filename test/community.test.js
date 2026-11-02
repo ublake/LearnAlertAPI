@@ -68,6 +68,9 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     async function request(path, method = 'GET', body, token) {
       const headers = {};
       if (token) headers.Authorization = `Bearer ${token}`;
+      if (body && typeof body === 'object' && !Array.isArray(body) && ((method === 'POST' && path === 'decks/drafts') || (['PUT', 'PATCH'].includes(method) && /^decks\/[a-f0-9-]{36}$/i.test(path)))) {
+        body = { acceptedRules: true, description: 'Original study content for this fixture.', ...body };
+      }
       if (body && !(body instanceof Uint8Array)) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
       const response = await mf.dispatchFetch(`https://api.example.test/v1/community/${path}`, { method, headers, body });
       // These ownership/media scenarios inspect a reviewed publication. The
@@ -125,7 +128,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     const image = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
     const audio = new TextEncoder().encode('RIFF1234WAVEfmt test data');
     async function upload(bytes, contentType, token = ownerToken) {
-      return mf.dispatchFetch(`https://api.example.test/v1/community/decks/${id}/media`, { method: 'POST', headers: { 'Content-Type': contentType, Authorization: `Bearer ${token}` }, body: bytes });
+      return mf.dispatchFetch(`https://api.example.test/v1/community/decks/${id}/media`, { method: 'POST', headers: { 'Content-Type': contentType, Authorization: `Bearer ${token}`, 'X-Community-Rules-Accepted': 'true' }, body: bytes });
     }
     assert.equal((await upload(image, 'image/jpeg', otherToken)).status, 404);
     assert.equal((await upload(image, 'text/html')).status, 415);
@@ -251,7 +254,7 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     // Account deletion removes profiles, sessions and public copies, preserving an R2 retry queue.
     const accountID = (await (await request('decks/drafts', 'POST', { name: 'Account removal' }, ownerToken)).json()).id;
     const attachment = await mf.dispatchFetch(`https://api.example.test/v1/community/decks/${accountID}/media`, {
-      method: 'POST', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${ownerToken}` }, body: image
+      method: 'POST', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${ownerToken}`, 'X-Community-Rules-Accepted': 'true' }, body: image
     });
     const attachmentID = (await attachment.json()).id;
     assert.equal((await request(`decks/${accountID}`, 'PUT', { name: 'Account removal', cards: [{ id: 'q', question: 'Q', correctAnswer: 'A', cardType: 'tap_reveal', promptImageID: attachmentID }] }, ownerToken)).status, 202);
