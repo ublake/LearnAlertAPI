@@ -262,6 +262,9 @@ test('community publishing preserves image/audio, enforces ownership, and hides 
     assert.equal(await db.prepare("SELECT id FROM community_users WHERE id='owner'").first(), null);
     assert.equal((await request('decks/drafts', 'POST', { name: 'Expired account' }, ownerToken)).status, 401);
     assert.ok((await db.prepare('SELECT COUNT(*) AS count FROM community_deleted_objects').first()).count > 0);
+    // Successful object deletions retain content-free keys briefly to catch
+    // uploads that were already running when a deck/account was removed.
+    await db.prepare('UPDATE community_deleted_objects SET retain_until=0').run();
     await cleanupCommunity({ COMMUNITY_DB: db, DECK_ASSETS: bucket });
     assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM community_deleted_objects').first()).count, 0);
   } finally { await mf.dispose(); }

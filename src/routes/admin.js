@@ -2,6 +2,7 @@ import { adminIdentity } from '../lib/adminAuth.js';
 import { CommunityError, readCommunityJSON, validateCommunityProfile, validateCommunityDeck, deckMetadata, MEDIA_TYPES, readLimitedBody, validateMedia } from '../lib/communityValidation.js';
 import { restrictedSQL } from '../lib/communityAuth.js';
 import { sha256 } from '../lib/communityAuth.js';
+import { sharedDeckDeletionStatements, accountSharedDeckDeletionStatements, queueObjectDeletion, drainDeletedObjects } from '../lib/communityDeletion.js';
 
 function reply(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: {
@@ -84,7 +85,8 @@ export async function admin(request, env) {
         if (!finalized.meta.changes) throw new CommunityError(409, 'Deck removed while uploading.');
         await audit('upload_media', deck.id, { mediaId: id, contentType, byteSize: bytes.length }).run();
       } catch (error) {
-        await env.DECK_ASSETS.delete(key);
+        await queueObjectDeletion(db,key);
+        await drainDeletedObjects(env,{keys:[key]});
         await db.prepare('DELETE FROM community_media WHERE id=?').bind(id).run();
         throw error;
       }
@@ -226,13 +228,14 @@ export async function admin(request, env) {
       const result = await db.batch([
         db.prepare(`INSERT INTO community_admin_audit(id,actor,action,target,details,created_at) SELECT ?,?,'delete_deck',?,?,? WHERE ${guard}`)
           .bind(crypto.randomUUID(),actor,deck.id,JSON.stringify({ name:deck.name,previousStatus:deck.status,adminNote:note,previousAdminNote:deck.admin_note }),now(),deck.id,deck.revision),
-        db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT object_key,? FROM community_media WHERE deck_id=? AND ${guard}`).bind(now(),deck.id,deck.id,deck.revision),
         db.prepare(`INSERT INTO community_deck_notices(deck_id,owner_id,name,card_count,admin_note,admin_updated_at)
           SELECT id,owner_id,name,card_count,?,? FROM community_decks WHERE id=? AND revision=? AND status!='deleted'`).bind(note,now(),deck.id,deck.revision),
-        db.prepare("DELETE FROM community_decks WHERE id=? AND revision=? AND status!='deleted'").bind(deck.id,deck.revision)
+        ...sharedDeckDeletionStatements(db,{deckID:deck.id,expectedRevision:deck.revision})
       ]);
       if (!result.at(-1).meta.changes) throw new CommunityError(409, 'Deck changed while deleting. Reload it.');
-      return reply({ success: true });
+      const keys=(await db.prepare('SELECT object_key FROM community_deleted_objects WHERE deck_id=? OR object_key LIKE ?').bind(deck.id,`decks/${deck.id}/%`).all()).results.map(row=>row.object_key);
+      const cleanup=await drainDeletedObjects(env,{keys});
+      return reply({ success: true, filesPending: cleanup.failed>0 });
     }
     if (detail && method === 'GET') {
       const deck = await db.prepare('SELECT d.*,u.handle FROM community_decks d JOIN community_users u ON u.id=d.owner_id WHERE d.id=?').bind(detail[1]).first();
@@ -296,13 +299,12 @@ export async function admin(request, env) {
       // Sessions cascade, and public content disappears immediately.
       await db.batch([
         db.prepare('INSERT INTO community_apple_revocations(id,encrypted_token,created_at) SELECT ?,encrypted_token,? FROM community_apple_tokens WHERE user_id=?').bind(crypto.randomUUID(),now(),body.id),
-        db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at)
-          SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id WHERE d.owner_id=?`).bind(now(), body.id),
+        ...accountSharedDeckDeletionStatements(db,body.id),
         db.prepare('DELETE FROM community_reports WHERE user_id=?').bind(body.id),
-        db.prepare('DELETE FROM community_decks WHERE owner_id=?').bind(body.id),
         db.prepare('DELETE FROM community_users WHERE id=?').bind(body.id),
         audit('delete_profile', body.id, { handle: profile.handle, decks: count.total })
       ]);
+      await drainDeletedObjects(env);
       return reply({ success: true });
     }
     if (path === 'reports/delete' && method === 'POST') {

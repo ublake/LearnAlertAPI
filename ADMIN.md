@@ -1,5 +1,28 @@
 # LearnAlert admin
 
+## Permanent shared-deck deletion and storage cleanup
+
+Apply migrations `0018_shared_deck_deletion.sql` and
+`0019_deleted_object_ownership.sql` before deploying the new deletion handlers.
+Owner, moderator, admin and account removal erase shared card content and child
+records, queue attachment keys in the same transaction, and attempt immediate
+batched R2 removal. Storage failures remain queued; successful keys remain for
+one day to catch uploads that were already in flight. Same-owner DELETE retries
+use content-free receipts for 30 days. A content-free creation ledger preserves
+the rolling upload quota and is eligible for cleanup after one day.
+
+Deck-target audit card/description/template snapshots are redacted on deletion,
+including orphaned snapshots left by older deletion paths. Administrative notes,
+action metadata, restrictions and minimal author removal notices remain.
+Daily cleanup also prunes expired sessions, old ordinary unsubmitted drafts,
+unused community attachments, Apple event IDs, AI rate windows and seven-day
+AI call logs. Pending/rejected submissions and admin-created drafts are kept.
+
+Catalog versions, delivery/legacy pins, language collections, speech jobs/budgets
+and referenced media remain necessary for downloads, history/restore and billing
+idempotency. Never infer that a file is unused solely from an absent current
+pointer: inspect all retained JSON references as well as SQL media indexes.
+
 ## Current deck-based studio
 
 The main workspaces are Shared decks, Language decks, and Moderation. Language
@@ -120,17 +143,17 @@ or download-count changes, without changing cards or attachment bookkeeping.
   report, with timestamps and before/after details.
 
 Hiding does not delete cards/media or trigger R2 cleanup. It cannot remotely
-remove copies that people already downloaded to their devices. Deleted decks
-cannot be restored here because the existing deletion cleanup may remove media.
+remove copies that people already downloaded to their devices. Permanently deleted
+decks cannot be restored here.
 Delete buttons are available for decks, reports, and profiles. Each requires an
 explicit confirmation in the dashboard and writes an audit entry. Deck deletion
-removes its D1 row, attached report/media metadata, and queues R2 objects for
-cleanup. Profile deletion removes all that user's community decks and reports,
+removes its D1 row, attached report/media metadata, and immediately attempts R2
+deletion with durable retries. Profile deletion removes all that user's community decks and reports,
 revokes every session, and queues their media. Personal device-local decks are
 unaffected; signing in with Apple again can create a new profile. Report deletion
 removes only that report and preserves its reason in the audit log. These actions
-cannot be undone; use Hide for reversible deck moderation. User bans are not
-included.
+cannot be undone; use Hide for reversible deck moderation. Persistent bans are
+managed separately and survive profile deletion.
 
 Admin writes require a JSON body and a same-origin browser request. The API
 validates Access JWT signatures, issuer, audience, lifetime and allowed email,

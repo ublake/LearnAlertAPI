@@ -1,6 +1,7 @@
 import { ensureCommunityUser } from '../lib/communityHandles.js';
 import { avatarResponse, creatorStats, profileCreatedAt, pageParameters, publicDeckSQL, validLikeSQL, reactionColumnsSQL } from '../lib/communityCreators.js';
 import { mediaCountColumnsSQL } from '../lib/communityMedia.js';
+import { removeSharedDeck, queueObjectDeletion, drainDeletedObjects, purgeExpiredSharedDecks, scrubOrphanedDeckAudits, accountSharedDeckDeletionStatements, CREATION_LEDGER_SECONDS, DELETED_DECK_RETRY_SECONDS } from '../lib/communityDeletion.js';
 import { communityDiscoveryOrder, communityLanguageFilter } from '../lib/communityDiscovery.js';
 import { rejectCommunityRepublication } from '../lib/communityValidation.js';
 import { json, apiError } from '../lib/http.js';
@@ -63,10 +64,8 @@ async function handle(request, env) {
     }
     const removal = path.match(new RegExp(`^/v1/community/moderation/decks/(${uuidPattern})$`));
     if (removal && method === 'DELETE') {
-      const result = await db.prepare("UPDATE community_decks SET status='deleted',updated_at=? WHERE id=? AND status!='deleted'")
-        .bind(now(), removal[1]).run();
-      if (!result.meta.changes) throw new CommunityError(404, 'Deck not found.');
-      return json({ success: true });
+      const result = await removeSharedDeck(env,removal[1]);
+      return json({ success: true,filesPending:result.filesPending });
     }
     throw new CommunityError(404, 'Endpoint not found.');
   }
@@ -219,6 +218,7 @@ async function handle(request, env) {
     const saved=await db.prepare('SELECT 1 FROM community_apple_tokens WHERE user_id=?').bind(user.id).first();
     if(appleConfigured(env)&&!saved)throw new CommunityError(409,'Sign in with Apple again to authorize account deletion.','APPLE_REAUTH_REQUIRED');
     const job=await deleteCommunityAccount(db,user.id);
+    await drainDeletedObjects(env);
     const appleRevocation=job ? (await revokeAppleJob(env,job) ? 'revoked' : 'pending') : 'not_configured';
     return json({success:true,appleRevocation});
   }
@@ -229,12 +229,13 @@ async function handle(request, env) {
     const eligible="EXISTS(SELECT 1 FROM community_users WHERE id=? AND created_at<=?) AND NOT EXISTS(SELECT 1 FROM community_apple_events WHERE id=?)";
     const statements=[];
     if(['consent-revoked','account-deleted'].includes(event.type))statements.push(
-      db.prepare(`INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id WHERE d.owner_id=? AND ${eligible}`).bind(now(),event.sub,event.sub,event.event_time,id),
+      ...accountSharedDeckDeletionStatements(db,event.sub,now(),{extraPredicate:eligible,extraValues:[event.sub,event.event_time,id]}),
       db.prepare(`DELETE FROM community_reports WHERE user_id=? AND ${eligible}`).bind(event.sub,event.sub,event.event_time,id),
-      db.prepare(`DELETE FROM community_decks WHERE owner_id=? AND ${eligible}`).bind(event.sub,event.sub,event.event_time,id),
       db.prepare(`DELETE FROM community_users WHERE id=? AND created_at<=? AND NOT EXISTS(SELECT 1 FROM community_apple_events WHERE id=?)`).bind(event.sub,event.event_time,id));
     statements.push(db.prepare('INSERT INTO community_apple_events(id,created_at) VALUES(?,?) ON CONFLICT(id) DO NOTHING').bind(id,now()));
-    await db.batch(statements);return json({success:true});
+    await db.batch(statements);
+    if(['consent-revoked','account-deleted'].includes(event.type))await drainDeletedObjects(env);
+    return json({success:true});
   }
 
   if(path==='/v1/community/account/blocks' && (method==='GET'||method==='POST')) {
@@ -323,7 +324,7 @@ async function handle(request, env) {
     const result = await db.prepare(`INSERT INTO community_decks(id,owner_id,name,description,category_tag,color_hex,deck_type,created_at,updated_at,review_status)
       SELECT ?,?,?,?,?,?,?,?,?,NULL WHERE
       (SELECT COUNT(*) FROM community_decks WHERE owner_id=? AND status!='deleted')<50 AND
-      (SELECT COUNT(*) FROM community_decks WHERE owner_id=? AND created_at>?)<20`)
+      (SELECT COUNT(*) FROM community_deck_creations WHERE owner_id=? AND created_at>?)<20`)
       .bind(id, user.id, meta.name, meta.description, meta.categoryTag, meta.colorHex, meta.deckType, now(), now(), user.id, user.id, now() - 86400).run();
     if (!result.meta.changes) throw new CommunityError(429, 'You can have 50 shared decks and create up to 20 per day.');
     return json({ id }, 201);
@@ -358,7 +359,10 @@ async function handle(request, env) {
         (SELECT 1 FROM community_decks WHERE id=? AND status!='deleted')`).bind(id, deck.id).run();
       if (!finalized.meta.changes) throw new CommunityError(409, 'This deck was removed while uploading.');
     } catch (error) {
-      await env.DECK_ASSETS.delete(key);
+      // A deck can be deleted while this put is in flight. Queue first so a
+      // failed rollback delete never leaves an unreachable attachment in R2.
+      await queueObjectDeletion(db,key);
+      await drainDeletedObjects(env,{keys:[key]});
       await db.prepare('DELETE FROM community_media WHERE id=?').bind(id).run();
       throw error;
     }
@@ -428,6 +432,8 @@ async function handle(request, env) {
     if (method === 'DELETE') {
       const dismissed = await db.prepare('DELETE FROM community_deck_notices WHERE deck_id=? AND owner_id=?').bind(id,user.id).run();
       if (dismissed.meta.changes) return json({ success: true });
+      const result=await removeSharedDeck(env,id,{ownerID:user.id});
+      return json({success:true,filesPending:result.filesPending});
     }
     const ownedPublication = await ownedDeck(env, id, user);
     if (method === 'PUT' || method === 'PATCH') {
@@ -466,11 +472,6 @@ async function handle(request, env) {
       const submitted = await db.prepare('SELECT submitted_at FROM community_decks WHERE id=? AND owner_id=?').bind(id,user.id).first();
       return json({ id, success: true, reviewStatus: 'pending', submittedAt: submitted?.submitted_at ?? now(), message: 'Review can take up to 3 days.' }, 202);
     }
-    if (method === 'DELETE') {
-      await db.prepare("UPDATE community_decks SET status='deleted',updated_at=? WHERE id=? AND owner_id=?").bind(now(), id, user.id).run();
-      // Immediately inaccessible; scheduled cleanup removes the underlying files.
-      return json({ success: true });
-    }
   }
   throw new CommunityError(404, 'Endpoint not found.');
 }
@@ -492,16 +493,15 @@ export async function cleanupCommunity(env) {
   const db = env.COMMUNITY_DB;
   await db.batch([
     db.prepare('DELETE FROM community_sessions WHERE expires_at<=?').bind(now()),
-    db.prepare("UPDATE community_decks SET status='deleted' WHERE status='draft' AND admin_created=0 AND COALESCE(review_status,'') NOT IN ('pending','rejected') AND updated_at<?").bind(now() - 86400)
+    db.prepare('DELETE FROM community_deck_creations WHERE created_at<?').bind(now()-CREATION_LEDGER_SECONDS),
+    db.prepare('DELETE FROM community_deleted_decks WHERE deleted_at<?').bind(now()-DELETED_DECK_RETRY_SECONDS)
   ]);
+  await purgeExpiredSharedDecks(env);
+  await scrubOrphanedDeckAudits(db);
   await db.prepare('DELETE FROM community_apple_events WHERE created_at<?').bind(now()-30*86400).run();
   const revocations=await db.prepare('SELECT id,encrypted_token FROM community_apple_revocations ORDER BY created_at LIMIT 10').all();
   for(const job of revocations.results)await revokeAppleJob(env,job);
-  const queued = await db.prepare('SELECT object_key FROM community_deleted_objects ORDER BY created_at LIMIT 500').all();
-  for (const row of queued.results) {
-    await env.DECK_ASSETS.delete(row.object_key);
-    await db.prepare('DELETE FROM community_deleted_objects WHERE object_key=?').bind(row.object_key).run();
-  }
+  await drainDeletedObjects(env);
   const { results } = await db.prepare(`SELECT m.id,m.object_key FROM community_media m JOIN community_decks d ON d.id=m.deck_id
     WHERE d.status='deleted' OR (m.attached=0 AND m.created_at<?) LIMIT 500`).bind(now() - 86400).all();
   for (const row of results) {
@@ -509,7 +509,8 @@ export async function cleanupCommunity(env) {
       (EXISTS(SELECT 1 FROM community_decks WHERE id=deck_id AND status='deleted')
        OR (attached=0 AND created_at<?))`).bind(row.id, now() - 86400).run();
     if (!claimed.meta.changes) continue;
-    await env.DECK_ASSETS.delete(row.object_key);
-    await db.prepare('DELETE FROM community_media WHERE id=? AND deleting=1').bind(row.id).run();
+    await queueObjectDeletion(db,row.object_key);
+    const removed=await drainDeletedObjects(env,{keys:[row.object_key]});
+    if (!removed.failed) await db.prepare('DELETE FROM community_media WHERE id=? AND deleting=1').bind(row.id).run();
   }
 }

@@ -1,5 +1,6 @@
 import { CommunityError } from './communityValidation.js';
 import { appleKeys, decodePart, verifyAppleIdentity } from './communityAuth.js';
+import { accountSharedDeckDeletionStatements } from './communityDeletion.js';
 const encoder=new TextEncoder();
 const epoch=()=>Math.floor(Date.now()/1000);
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
@@ -65,9 +66,8 @@ export async function deleteCommunityAccount(db,id,queueRevocation=true) {
   const statements=[];
   if(queueRevocation)statements.push(db.prepare('INSERT INTO community_apple_revocations(id,encrypted_token,created_at) SELECT ?,encrypted_token,? FROM community_apple_tokens WHERE user_id=?').bind(jobID,epoch(),id));
   statements.push(
-    db.prepare('INSERT OR IGNORE INTO community_deleted_objects(object_key,created_at) SELECT m.object_key,? FROM community_media m JOIN community_decks d ON d.id=m.deck_id WHERE d.owner_id=?').bind(epoch(),id),
+    ...accountSharedDeckDeletionStatements(db,id),
     db.prepare('DELETE FROM community_reports WHERE user_id=?').bind(id),
-    db.prepare('DELETE FROM community_decks WHERE owner_id=?').bind(id),
     db.prepare('DELETE FROM community_users WHERE id=?').bind(id));
   await db.batch(statements);
   return db.prepare('SELECT id,encrypted_token FROM community_apple_revocations WHERE id=?').bind(jobID).first();

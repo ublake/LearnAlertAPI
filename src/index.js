@@ -92,6 +92,7 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(cleanupCommunity(env));
     ctx.waitUntil(pruneAILimits(env));
+    ctx.waitUntil(pruneCalls(env));
   },
   async fetch(request, env, ctx) {
     const requestId = crypto.randomUUID();

@@ -127,7 +127,8 @@ test('admin moderation hides all public entry points, survives owner edits, rest
     assert.equal(await db.prepare('SELECT id FROM community_decks WHERE id=?').bind(second).first(), null);
     assert.equal((await pub(`media/${secondMedia}`)).status, 404);
     assert.equal((await mf.dispatchFetch('https://api.example.test/v1/community/account', { headers: { Authorization: `Bearer ${session}` } })).status, 401);
-    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM community_deleted_objects').first()).n, 1);
+    assert.deepEqual((await db.prepare('SELECT object_key FROM community_deleted_objects ORDER BY object_key').all()).results.map(row=>row.object_key), ['profile-image','test-image']);
+    assert.equal(await bucket.head('profile-image'), null);
     assert.ok(await db.prepare("SELECT id FROM community_users WHERE id='reporter'").first());
     await cleanupCommunity({ COMMUNITY_DB: db, DECK_ASSETS: bucket });
     assert.equal(await bucket.head('profile-image'), null);
@@ -293,7 +294,8 @@ test('author admin notes stay private, survive resubmission, and deleted notices
     await cleanupCommunity({COMMUNITY_DB:db,DECK_ASSETS:bucket}); assert.equal(await bucket.head('notice-image'),null); assert.ok(await row());
     assert.equal((await app('decks/'+id,'DELETE',undefined,other)).status,404); assert.ok(await row());
     assert.equal((await app('decks/'+id,'DELETE')).status,200); assert.equal(await row(),undefined);
-    assert.equal((await app('decks/'+id,'DELETE')).status,404);
+    assert.equal((await app('decks/'+id,'DELETE')).status,200); // Same-owner retry stays idempotent.
+    assert.equal(await row(),undefined);
     // More than one page of notices must not erase existing active entries.
     for(let i=0;i<52;i++)await db.prepare('INSERT INTO community_deck_notices(deck_id,owner_id,name,card_count,admin_note,admin_updated_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(),'author','Removed '+i,1,'Notice',i+1).run();
     let page=await (await app('account/decks')).json(); assert.equal(page.decks.length,50); assert.equal(page.nextOffset,50);
