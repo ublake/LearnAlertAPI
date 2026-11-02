@@ -34,7 +34,11 @@ Revoke access and its upload preference:
 UPDATE community_users SET is_developer=0,developer_anki_uploads=0 WHERE handle='@jolly_sprout' COLLATE NOCASE;
 ```
 
-The backend also supports authenticated `PUT /v1/community/account/developer` for an existing developer to save their own `allowAnkiUploads` preference. The current iOS Settings screen does not expose this developer options menu; the admin controls do not change the app's upload screens or their gates. The server checks the current role and switch again for drafts, binary attachments, and submissions. The switch defaults off. Published decks remain subject to the usual moderation, blocking, reporting, and media ownership checks.
+The app shows a Developer category at the bottom of Settings only for a signed-in account with this role. Its Anki uploads switch saves the account preference through authenticated `PUT /v1/community/account/developer`. Settings refreshes the owner profile when opened or brought to the foreground; Refresh access can also fetch the current role. Sign-out or a refreshed revocation removes the tools. Delayed profile reads and preference responses cannot overwrite newer account state.
+
+Developer tools include the existing Sound Studio and System Check, plus a read-only diagnostics report with aggregate library/notification/catalog counts, storage availability, and app environment. The report excludes account IDs, credentials, API keys, and card content. These tools do not grant backend privileges or change learning progress.
+
+The app's sharing picker and deck menus honor the Anki-upload preference. Before uploading an Anki deck or using a custom publishing name, the transfer reads the current owner profile from the server again. The server checks the current role and switch independently for drafts, binary attachments, and submissions. The switch defaults off. Built-in and downloaded shared decks remain ineligible for republishing. Published decks remain subject to the usual moderation, blocking, reporting, and media ownership checks.
 
 Developers can set an optional `publisherHandle` per submission. It changes only the listing attribution, never their permanent account username or the stable profile ID. It can also be used for native decks while Anki uploads are disabled.
 
