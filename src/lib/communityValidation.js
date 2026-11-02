@@ -111,14 +111,15 @@ export function validateCommunityDeck(body, developer = false) {
         ankiContent: { frontHTML: text(content.frontHTML, 200000, 'Anki front'), backHTML: text(content.backHTML, 200000, 'Anki back'), css: text(content.css ?? '',100000,'Anki styles'),
           mediaFolder: content.mediaFolder, templateOrdinal: content.templateOrdinal, noteType: text(content.noteType ?? '',120,'Anki note type'), tags: strings(content.tags ?? [],100,120,'Anki tags') } };
     }
-    if (!['vocabulary','multiple_choice','tap_reveal','matching','fill_blank','images'].includes(card.cardType)) {
+    if (!['vocabulary','multiple_choice','tap_reveal','matching','fill_blank','images','drag_answer'].includes(card.cardType)) {
       throw new CommunityError(400, 'Invalid card type.');
     }
     const imageOnly = card.cardType === 'images';
     const question = text(card.question ?? '', 5000, 'Question');
     const correctAnswer = text(card.correctAnswer ?? '', 10000, 'Answer');
     const hint = text(card.hint ?? '', 2000, 'Hint');
-    const options = strings(card.options ?? [], 4, 5000, 'answer choices');
+    const dragAnswer = card.cardType === 'drag_answer';
+    const options = strings(card.options ?? [], dragAnswer ? 30 : 4, 5000, dragAnswer ? 'ordered tokens' : 'answer choices');
     const left = strings(card.matchingLeftItems ?? [], 20, 5000, 'matching items');
     const right = strings(card.matchingRightItems ?? [], 20, 5000, 'matching items');
     if (!Array.isArray(card.optionImageIDs ?? []) || (card.optionImageIDs ?? []).length > options.length) throw new CommunityError(400, 'Invalid answer images.');
@@ -150,12 +151,15 @@ export function validateCommunityDeck(body, developer = false) {
       if (card.correctOptionIndex == null && (!correctAnswer || options.filter(value => value === correctAnswer).length !== 1)) throw new CommunityError(400, 'Use correctOptionIndex for media-only or duplicate answer text.');
     }
     if (card.cardType === 'matching' && (left.length < 2 || left.length !== right.length || left.some((value, i) => !content(`left:${i}`, value)) || right.some((value, i) => !content(`right:${i}`, value)))) throw new CommunityError(400, 'Matching cards need at least two complete text, image or audio pairs.');
+    if (dragAnswer && (options.length < 2 || options.some((value, i) => value.length > 160 || !content(`option:${i}`, value)) || card.correctOptionIndex != null || left.length || right.length)) {
+      throw new CommunityError(400, 'Drag to Answer needs 2–30 text, image or audio tokens in the correct order, without a correct-choice index or matching pairs.');
+    }
     if (!imageOnly && card.cardType !== 'matching' && !content('prompt', question)) throw new CommunityError(400, 'Add text, an image or audio to the question.');
-    if (!imageOnly && !['matching','multiple_choice'].includes(card.cardType) && !(card.cardType === 'fill_blank' && options.length) && !content('answer', correctAnswer)) throw new CommunityError(400, 'Add text, an image or audio to the answer.');
+    if (!imageOnly && !['matching','multiple_choice','drag_answer'].includes(card.cardType) && !(card.cardType === 'fill_blank' && options.length) && !content('answer', correctAnswer)) throw new CommunityError(400, 'Add text, an image or audio to the answer.');
     if (imageOnly && (!fieldMedia.prompt?.imageID || question || correctAnswer || hint || options.length || left.length || right.length || Object.entries(fieldMedia).some(([key, value]) => !['prompt','answer'].includes(key) || value.audioID))) throw new CommunityError(400, 'Image cards need a front image, an optional back image, and no question, answer, hint, choices, matching pairs, or audio.');
     // Reject attachments for fields that the selected card type does not present.
     for (const [key, item] of Object.entries(fieldMedia)) {
-      if (key.startsWith('option:') && !['multiple_choice','fill_blank'].includes(card.cardType) || /^(left|right):/.test(key) && card.cardType !== 'matching' || key === 'answer' && ['multiple_choice','matching'].includes(card.cardType)) {
+      if (key.startsWith('option:') && !['multiple_choice','fill_blank','drag_answer'].includes(card.cardType) || /^(left|right):/.test(key) && card.cardType !== 'matching' || key === 'answer' && ['multiple_choice','matching','drag_answer'].includes(card.cardType)) {
         if (item.imageID || item.audioID) throw new CommunityError(400, 'Attachment field does not belong to this card type.');
       }
       for (const [kind, id] of [['image', item.imageID], ['audio', item.audioID]]) {
@@ -165,7 +169,8 @@ export function validateCommunityDeck(body, developer = false) {
       }
       if (!item.imageID && !item.audioID) delete fieldMedia[key];
     }
-    return { id, question, correctAnswer: correctOptionIndex != null ? options[correctOptionIndex] : correctAnswer,
+    const orderedAnswer = dragAnswer ? options.map((value,i) => value || (fieldMedia[`option:${i}`]?.imageID ? 'Image' : 'Audio')).join(' ') : correctAnswer;
+    return { id, question, correctAnswer: correctOptionIndex != null ? options[correctOptionIndex] : orderedAnswer,
       options, hint, correctOptionIndex, cardType: card.cardType, matchingLeftItems: left, matchingRightItems: right,
       sectionName: text(card.sectionName ?? '', 120, 'Section'), fieldMedia,
       promptImageID: fieldMedia.prompt?.imageID ?? null, answerImageID: fieldMedia.answer?.imageID ?? null,
@@ -227,7 +232,9 @@ export function communityContentSignature(cards) {
   // Image uploads have no stable content hash in the media schema. Their empty
   // text must not make unrelated photo decks look like copies of each other.
   // Provenance and attachment ownership checks still apply to every image card.
-  const textCards = cards.filter(card => card.cardType === 'matching'
+  const textCards = cards.filter(card => card.cardType === 'drag_answer'
+    ? card.question?.trim() && card.options?.length && card.options.every(value => value.trim())
+    : card.cardType === 'matching'
     ? card.matchingLeftItems?.length && card.matchingLeftItems.every(value => value.trim()) && card.matchingRightItems?.every(value => value.trim())
     : card.cardType !== 'images' && card.question?.trim() && card.correctAnswer?.trim());
   if (textCards.length < 3) return null;

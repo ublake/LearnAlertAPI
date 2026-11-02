@@ -15,6 +15,7 @@ const MATCHING_PAIR_SCHEMA = {
 function cardSchema(type) {
   const multipleChoice = type === "multiple_choice";
   const matching = type === "matching";
+  const ordered = type === "drag_answer";
 
   return {
     type: "object",
@@ -38,10 +39,11 @@ function cardSchema(type) {
       options: {
         type: "array",
         items: {
-          type: "string"
+          type: "string",
+          ...(ordered ? { minLength: 1, maxLength: 160 } : {})
         },
-        minItems: multipleChoice ? 4 : 0,
-        maxItems: multipleChoice ? 4 : 0
+        minItems: ordered ? 2 : multipleChoice ? 4 : 0,
+        maxItems: ordered ? 30 : multipleChoice ? 4 : 0
       },
       correctAnswerIndex: {
         type: "integer",
@@ -86,7 +88,8 @@ const CARD_SCHEMA = {
     cardSchema("tap_reveal"),
     cardSchema("multiple_choice"),
     cardSchema("matching"),
-    cardSchema("fill_blank")
+    cardSchema("fill_blank"),
+    cardSchema("drag_answer")
   ]
 };
 

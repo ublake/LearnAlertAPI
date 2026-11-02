@@ -5,9 +5,9 @@ import { CommunityError, readCommunityJSON } from './communityValidation.js';
 // outside D1's per-row limit. Unknown fields survive round trips and revisions.
 export const CATALOG_JSON_MAXIMUM = 16 * 1024 * 1024;
 export const catalogIDPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const courseTypes = new Set(['multipleChoice','vocabulary','tapReveal','matching','fillBlank','listening','listeningWrite','images','hangulBuild','tokenPlacement','hangulTrace']);
-const deckTypes = new Set(['multiple_choice','vocabulary','tap_reveal','matching','fill_blank','images','anki']);
-const languageDeckTypes = new Set(['multipleChoice','multiple_choice','vocabulary','tapReveal','tap_reveal','matching','fillBlank','fill_blank','images']);
+const courseTypes = new Set(['multipleChoice','vocabulary','tapReveal','matching','fillBlank','listening','listeningWrite','images','hangulBuild','tokenPlacement','hangulTrace','drag_answer']);
+const deckTypes = new Set(['multiple_choice','vocabulary','tap_reveal','matching','fill_blank','images','anki','drag_answer']);
+const languageDeckTypes = new Set(['multipleChoice','multiple_choice','vocabulary','tapReveal','tap_reveal','matching','fillBlank','fill_blank','images','drag_answer']);
 const activityKinds = new Set(['teach','trace','buildBlock','placeTokens','listenChoose','situation','matchPairs']);
 const nodeTypes = new Set(['lesson','practice','checkpoint','cultural_tip']);
 function fail(path, message) { throw new CommunityError(400, `${path}: ${message}`, 'CATALOG_VALIDATION'); }
@@ -67,6 +67,23 @@ function validateLanguageDeckCard(card, path) {
 }
 function normalizedAnswer(value) { return value.normalize('NFC').toLowerCase().replace(/[\p{White_Space}\p{P}]/gu, ''); }
 function validateAnswerability(card, path, course) {
+  if (card.cardType === 'drag_answer') {
+    const options = card.options ?? [];
+    if (options.length < 2 || options.length > 30) fail(`${path}.options`, 'provide 2–30 tokens in the correct answer order.');
+    if (!card.question.trim() && !fieldHasMedia(card,'prompt')) fail(`${path}.question`, 'add text, an image or audio for the prompt.');
+    options.forEach((value,index) => {
+      if (value.trim().length > 160 || !value.trim() && !fieldHasMedia(card,`option:${index}`)) fail(`${path}.options[${index}]`, 'use up to 160 characters, or an image/audio token.');
+    });
+    if (card.correctOptionIndex != null || card.activity || (card.matchingLeftItems?.length || 0) || (card.matchingRightItems?.length || 0) || (card.acceptedAnswers?.length || 0)) fail(path, 'ordered tokens define the single answer; omit choice indices, activities, matching pairs and acceptedAnswers.');
+    if (fieldHasMedia(card,'answer') || hasValue(card.answerImageID) || (card.optionImageNames?.length || 0) > options.length || (card.optionImageIDs?.length || 0) > options.length) fail(path, 'attach media to the prompt, hint or existing token positions.');
+    for (const [key,media] of Object.entries(card.fieldMedia || {})) {
+      const index = /^option:(\d+)$/.exec(key);
+      if (!['prompt','hint'].includes(key) && !(index && String(Number(index[1])) === index[1] && Number(index[1]) < options.length) && Object.values(media).some(hasValue)) fail(`${path}.fieldMedia.${key}`, 'this field is not shown by Drag to Answer.');
+    }
+    card.options = options.map(value => value.trim());
+    card.correctAnswer = card.options.map((value,index) => value || (hasValue(resolvedFieldMedia(card,`option:${index}`).image) ? 'Image' : 'Audio')).join(' ');
+    return;
+  }
   const activity = card.activity?.kind;
   const matching = activity === 'matchPairs' || !activity && card.cardType === 'matching';
   if (matching) {
@@ -95,6 +112,10 @@ function validateAnswerability(card, path, course) {
 }
 function validateCard(card, path, course, learning, modern = false, languageDeck = false) {
   object(card, path); string(card.id, `${path}.id`, true);
+  if (card.cardType === 'drag_answer') {
+    card.question ??= '';
+    card.correctAnswer ??= '';
+  }
   string(card.question, `${path}.question`); string(card.correctAnswer, `${path}.correctAnswer`);
   const types = course ? courseTypes : deckTypes;
   if (!types.has(card.cardType) && !(languageDeck && languageDeckTypes.has(card.cardType))) fail(`${path}.cardType`, 'unsupported card type for the app.');
@@ -162,7 +183,7 @@ export function validateCatalogContent(kind, content, id, { publish = false, del
       for (const unit of content.units || []) {
         if (unit.checkpointQuiz) fail('content.units', 'language collections do not use checkpoints.');
         for (const lesson of unit.lessons || []) for (const card of lesson.cards || []) {
-          if (card.activity || card.explanation || card.grammarNote || !languageDeckTypes.has(card.cardType)) fail('content.units', 'use regular quiz, matching, blank, flashcard or image cards without explanation metadata.');
+          if (card.activity || card.explanation || card.grammarNote || !languageDeckTypes.has(card.cardType)) fail('content.units', 'use regular quiz, matching, blank, ordering, flashcard or image cards without explanation metadata.');
           if (['fillBlank','fill_blank'].includes(card.cardType) && (card.options?.length || 0) && !/_{2,}|\{blank\}|\[blank\]/.test(card.question)) fail('content.units', 'choice blanks need a ___ in the prompt.');
         }
       }

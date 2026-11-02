@@ -64,7 +64,8 @@ function normalizeCard(card, usedIds, validIds = null) {
     "tap_reveal",
     "multiple_choice",
     "matching",
-    "fill_blank"
+    "fill_blank",
+    "drag_answer"
   ].includes(card?.type)
     ? card.type
     : "tap_reveal";
@@ -99,6 +100,12 @@ function normalizeCard(card, usedIds, validIds = null) {
     }
 
     answer = normalizedOptions[correctAnswerIndex];
+  } else if (type === "drag_answer") {
+    if (!Array.isArray(card?.options) || card.options.some(value => typeof value !== 'string') || options.length < 2 || options.length > 30 || options.some(value => !value || value.length > 160) || !cleanString(card?.prompt)) {
+      throw new CardError("Drag to Answer needs a prompt and 2 to 30 nonempty tokens, each up to 160 characters, in the correct order.");
+    }
+    answer = options.join(" ");
+    correctAnswerIndex = -1;
   } else {
     normalizedOptions = [];
     correctAnswerIndex = -1;

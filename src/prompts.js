@@ -38,6 +38,8 @@ Use "matching" when 2 to 4 one-to-one term/definition, word/translation, or conc
 
 Use "fill_blank" when active recall is best tested by completing one missing term or short phrase in context.
 
+Use "drag_answer" for arranging words, short chunks, or ordered steps. options contains the complete correct sequence; the app shuffles its presentation.
+
 Respect generation_preferences.preferredCardTypes. Only create card types listed there.
 
 For language-learning material:
@@ -78,6 +80,14 @@ For fill_blank:
 - answer must contain the text that correctly fills the blank
 - options and matchingPairs must be []
 - correctAnswerIndex must be -1
+
+For drag_answer:
+- options must contain 2 to 30 nonempty tokens in the correct answer order, each up to 160 characters
+- use every provided token exactly once; repeated words are allowed
+- do not shuffle options in generated data and do not add distractors
+- answer must be the ordered tokens joined with spaces
+- correctAnswerIndex must be -1 and matchingPairs must be []
+- prompt explains what sentence, translation, or sequence to construct; hints must not give away the sequence
 
 CONVERSATION MEMORY & TUTORING
 - Use the preceding user and assistant messages to understand follow-up requests and references.
@@ -136,6 +146,7 @@ CARD RULES
 - multiple_choice: exactly 4 distinct options, exactly one correct, correctAnswerIndex pointing at it, the other three plausible but wrong. Hints must help without giving away the answer.
 - matching: 2 to 4 pairs, every left value and every right value unique, ignoring case.
 - fill_blank: exactly one visible blank written as ____, and answer is the text that fills it.
+- drag_answer: 2–30 nonempty options (up to160 characters each) in the canonical correct order, duplicates allowed. answer joins them with spaces, correctAnswerIndex is -1, matchingPairs is empty. Never pre-shuffle the stored options or add distractors.
 - tap_reveal: direct recall; prompt is the front, answer is the reveal.
 `.trim();
 

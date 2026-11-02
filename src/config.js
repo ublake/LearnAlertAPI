@@ -262,7 +262,8 @@ export const CARD_TYPES = [
   "tap_reveal",
   "multiple_choice",
   "matching",
-  "fill_blank"
+  "fill_blank",
+  "drag_answer"
 ];
 
 export const MODES = [
