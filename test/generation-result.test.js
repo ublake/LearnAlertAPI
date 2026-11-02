@@ -50,7 +50,7 @@ test("uses a strict root object with a nullable nested deck", () => {
 
   assert.deepEqual(
     cardSchemas.map((schema) => schema.properties.type.enum[0]),
-    ["tap_reveal", "multiple_choice", "matching", "fill_blank"]
+    ["tap_reveal", "multiple_choice", "matching", "fill_blank", "drag_answer"]
   );
   assert.equal(matchingSchema.properties.matchingPairs.minItems, 2);
   assert.equal(matchingSchema.properties.matchingPairs.maxItems, 4);

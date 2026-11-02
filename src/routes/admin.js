@@ -141,6 +141,13 @@ export async function admin(request, env) {
       list = await db.prepare(`SELECT u.id,u.public_id AS author_id,u.handle,u.avatar_json,u.profile_completed,u.created_at,r.status AS restriction_status,r.reason AS restriction_reason,r.until_at,COALESCE(r.revision,0) AS restriction_revision,
         (SELECT COUNT(*) FROM community_decks d WHERE d.owner_id=u.id AND d.status!='deleted') AS deck_count
         FROM community_users u LEFT JOIN community_account_restrictions r ON r.account_id=u.id WHERE (?='' OR u.handle LIKE ? ESCAPE '\\') ORDER BY u.created_at DESC,u.id LIMIT 51 OFFSET ?`).bind(q, pattern, offset).all();
+    } else if (method === 'GET' && path === 'developers') {
+      const role = url.searchParams.get('role') || 'all';
+      if (!['all', 'developer'].includes(role)) throw new CommunityError(400, 'Choose a valid developer role filter.');
+      list = await db.prepare(`SELECT u.id,u.public_id AS author_id,u.handle,u.created_at,u.profile_completed,u.is_developer,u.developer_anki_uploads,r.status AS restriction_status,r.until_at
+        FROM community_users u LEFT JOIN community_account_restrictions r ON r.account_id=u.id
+        WHERE (?='all' OR u.is_developer=1) AND (?='' OR u.handle LIKE ? ESCAPE '\\' OR u.id LIKE ? ESCAPE '\\' OR u.public_id LIKE ? ESCAPE '\\')
+        ORDER BY u.created_at DESC,u.id LIMIT 51 OFFSET ?`).bind(role, q, pattern, pattern, pattern, offset).all();
     } else if (method === 'GET' && path === 'reports') {
       const resolved = url.searchParams.get('resolved') === 'true' ? 1 : 0;
       list = await db.prepare(`SELECT r.*,d.name,d.status,d.revision,d.admin_hidden,d.admin_note,d.admin_action,d.admin_updated_at,owner.handle AS owner_handle,reporter.handle AS reporter_handle
@@ -155,6 +162,37 @@ export async function admin(request, env) {
       list = await db.prepare('SELECT * FROM community_admin_audit ORDER BY created_at DESC,id LIMIT 51 OFFSET ?').bind(offset).all();
     }
     if (list) return reply({ items: list.results.slice(0, 50), nextOffset: list.results.length > 50 ? offset + 50 : null });
+    if (path === 'developers/update' && method === 'POST') {
+      const body = await readCommunityJSON(request, false, 8192);
+      const flags = ['isDeveloper', 'allowAnkiUploads', 'expectedIsDeveloper', 'expectedAllowAnkiUploads'];
+      if (!body || typeof body !== 'object' || Array.isArray(body) ||
+          typeof body.id !== 'string' || !body.id.trim() || body.id.length > 255 ||
+          flags.some(key => typeof body[key] !== 'boolean') ||
+          Object.keys(body).some(key => key !== 'id' && !flags.includes(key)) ||
+          (body.allowAnkiUploads && !body.isDeveloper)) {
+        throw new CommunityError(400, 'Choose a valid developer role and Anki upload option, then refresh the account before saving.');
+      }
+      if (!await db.prepare('SELECT id FROM community_users WHERE id=?').bind(body.id).first()) throw new CommunityError(404, 'Profile not found.');
+      const isDeveloper = body.isDeveloper ? 1 : 0;
+      const allowAnkiUploads = body.isDeveloper && body.allowAnkiUploads ? 1 : 0;
+      const expected = [body.id, body.expectedIsDeveloper ? 1 : 0, body.expectedAllowAnkiUploads ? 1 : 0];
+      const guard = 'id=? AND is_developer=? AND developer_anki_uploads=?';
+      // The conditional audit and compare-and-swap share one D1 transaction.
+      // A stale account snapshot changes neither the account nor audit history.
+      const result = await db.batch([
+        db.prepare(`INSERT INTO community_admin_audit(id,actor,action,target,details,created_at)
+          SELECT ?,?,'update_developer',?,?,? WHERE EXISTS(SELECT 1 FROM community_users WHERE ${guard})`)
+          .bind(crypto.randomUUID(), actor, body.id, JSON.stringify({
+            before: { isDeveloper: body.expectedIsDeveloper, allowAnkiUploads: body.expectedAllowAnkiUploads },
+            after: { isDeveloper: Boolean(isDeveloper), allowAnkiUploads: Boolean(allowAnkiUploads) }
+          }), now(), ...expected),
+        db.prepare(`UPDATE community_users SET is_developer=?,developer_anki_uploads=? WHERE ${guard}
+          RETURNING id,handle,is_developer,developer_anki_uploads`).bind(isDeveloper, allowAnkiUploads, ...expected)
+      ]);
+      const user = result[1].results[0];
+      if (!user) throw new CommunityError(409, 'Developer access changed. Refresh the account before saving.');
+      return reply({ success: true, user: { id: user.id, handle: user.handle, isDeveloper: Boolean(user.is_developer), allowAnkiUploads: Boolean(user.developer_anki_uploads) } });
+    }
     const reviewMatch = path.match(/^decks\/([a-fA-F0-9-]{36})\/review$/);
     if (reviewMatch && method === 'POST') {
       const body = await readCommunityJSON(request);
